@@ -38,7 +38,8 @@ func main() {
 		`)
 	})
 
-	fs := http.FileServer(http.Dir("static/"))
+	// serve files from the public directory
+	fs := http.FileServer(http.Dir("public/"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
 	fmt.Println("Started server on http://localhost:8080")
