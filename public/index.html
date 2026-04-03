@@ -1,102 +1,279 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Health Check Mission - Golang</title>
-  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u"
-    crossorigin="anonymous">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Google Cloud Spaces</title>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#fff;
+    font-family:'Google Sans','Inter',system-ui,sans-serif;
+    overflow:hidden;color:#202124;
+  }
+
+  .container{
+    text-align:center;padding:40px 20px;
+  }
+
+  /* Scene */
+  .scene{
+    position:relative;width:280px;height:280px;
+    margin:0 auto 40px;
+  }
+
+  /* Soft background glow */
+  .scene::before{
+    content:'';position:absolute;inset:-20px;border-radius:50%;
+    background:radial-gradient(circle,rgba(66,133,244,.06) 0%,transparent 70%);
+  }
+
+  /* Stars - subtle dots */
+  .star{
+    position:absolute;border-radius:50%;background:#dadce0;
+    animation:twinkle var(--d,3s) ease-in-out infinite alternate;
+  }
+  @keyframes twinkle{0%{opacity:.2;transform:scale(.8)}100%{opacity:var(--o,.6);transform:scale(1)}}
+
+  /* Planet */
+  .planet{
+    position:absolute;width:90px;height:90px;border-radius:50%;
+    top:15px;right:25px;
+    background:radial-gradient(circle at 35% 30%,#a8c7fa,#4285f4,#1a73e8);
+    box-shadow:0 4px 24px rgba(66,133,244,.2);
+    animation:planetFloat 8s ease-in-out infinite;
+  }
+  .planet::before{
+    content:'';position:absolute;inset:-14px -24px;
+    border:2px solid rgba(66,133,244,.25);border-radius:50%;
+    transform:rotateX(70deg) rotateZ(-15deg);
+    animation:ringRotate 14s linear infinite;
+  }
+  .crater{position:absolute;border-radius:50%;background:rgba(255,255,255,.15)}
+  .crater:nth-child(1){width:14px;height:14px;top:20px;left:30px}
+  .crater:nth-child(2){width:10px;height:10px;top:45px;left:58px}
+  .crater:nth-child(3){width:8px;height:8px;top:55px;left:25px}
+  @keyframes planetFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+  @keyframes ringRotate{0%{transform:rotateX(70deg) rotateZ(-15deg)}100%{transform:rotateX(70deg) rotateZ(345deg)}}
+
+  /* Rocket */
+  .rocket{
+    position:absolute;bottom:50px;left:35px;
+    animation:rocketFloat 6s ease-in-out infinite;
+  }
+  @keyframes rocketFloat{0%,100%{transform:translateY(0) rotate(-6deg)}50%{transform:translateY(-14px) rotate(-3deg)}}
+
+  .rocket-body{
+    width:34px;height:90px;
+    background:linear-gradient(90deg,#e8eaed,#f8f9fa,#e8eaed);
+    border-radius:50% 50% 6px 6px / 28% 28% 6px 6px;
+    position:relative;
+    box-shadow:0 2px 12px rgba(0,0,0,.08);
+  }
+  .rocket-body::before{
+    content:'';position:absolute;top:12px;left:50%;transform:translateX(-50%);
+    width:16px;height:16px;border-radius:50%;
+    background:radial-gradient(circle,#c8e6ff,#4285f4);
+  }
+  .rocket-body::after{
+    content:'';position:absolute;top:35px;left:50%;transform:translateX(-50%);
+    width:14px;height:14px;border-radius:50%;
+    background:radial-gradient(circle,#c8e6ff,#4285f4);
+  }
+
+  .fin{position:absolute;bottom:0;width:13px;height:32px}
+  .fin-left{left:-9px;border-radius:50% 0 0 30%;transform:skewY(8deg);background:linear-gradient(180deg,#ea4335,#c5221f)}
+  .fin-right{right:-9px;border-radius:0 50% 30% 0;transform:skewY(-8deg);background:linear-gradient(180deg,#ea4335,#c5221f)}
+
+  .flame{
+    position:absolute;bottom:-22px;left:50%;transform:translateX(-50%);
+    width:14px;height:24px;
+    background:linear-gradient(180deg,#fbbc04,#f9ab00,rgba(249,171,0,0));
+    border-radius:50% 50% 50% 50% / 30% 30% 70% 70%;
+    animation:flameFlicker .15s ease-in-out infinite alternate;
+    filter:blur(0.5px);
+  }
+  .flame::before{
+    content:'';position:absolute;top:2px;left:50%;transform:translateX(-50%);
+    width:8px;height:16px;
+    background:linear-gradient(180deg,#fff,#fbbc04,transparent);
+    border-radius:50%;
+  }
+  @keyframes flameFlicker{0%{height:20px;opacity:.85}100%{height:26px;opacity:1}}
+
+  /* Astronaut */
+  .astronaut{
+    position:absolute;bottom:25px;right:35px;
+    animation:astroFloat 7s ease-in-out infinite;
+  }
+  @keyframes astroFloat{0%,100%{transform:translateY(0) rotate(1deg)}50%{transform:translateY(-10px) rotate(-1deg)}}
+
+  .helmet{
+    width:44px;height:44px;border-radius:50%;
+    background:linear-gradient(135deg,#e8eaed,#f8f9fa,#dadce0);
+    position:relative;margin:0 auto -6px;
+    box-shadow:0 2px 8px rgba(0,0,0,.08);
+  }
+  .visor{
+    position:absolute;top:9px;left:9px;width:28px;height:24px;
+    border-radius:50%;
+    background:linear-gradient(135deg,#1a73e8,#4285f4,#1a73e8);
+    box-shadow:inset 1px 1px 4px rgba(255,255,255,.2);
+  }
+  .visor::before{
+    content:'';position:absolute;top:4px;left:4px;width:10px;height:6px;
+    border-radius:50%;background:rgba(255,255,255,.25);transform:rotate(-20deg);
+  }
+
+  .torso{
+    width:42px;height:44px;
+    background:linear-gradient(90deg,#5f6368,#80868b,#5f6368);
+    border-radius:8px;margin:0 auto;position:relative;
+    box-shadow:0 2px 8px rgba(0,0,0,.08);
+  }
+  .panel{
+    position:absolute;top:7px;left:50%;transform:translateX(-50%);
+    width:24px;height:18px;border-radius:3px;
+    background:#3c4043;
+  }
+  .panel .light{
+    width:5px;height:5px;border-radius:50%;
+    position:absolute;top:3px;
+  }
+  .panel .light:nth-child(1){left:3px;background:#34a853;animation:blink 1.5s infinite}
+  .panel .light:nth-child(2){left:11px;background:#ea4335;animation:blink 2s infinite .5s}
+  .light-bar{
+    position:absolute;bottom:2px;left:3px;right:3px;height:3px;
+    border-radius:2px;background:#202124;overflow:hidden;
+  }
+  .light-bar::after{
+    content:'';display:block;width:50%;height:100%;
+    background:#4285f4;border-radius:2px;
+    animation:barPulse 2s ease-in-out infinite;
+  }
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  @keyframes barPulse{0%,100%{width:30%}50%{width:70%}}
+
+  .arm{
+    position:absolute;width:11px;height:32px;
+    background:linear-gradient(180deg,#5f6368,#80868b);
+    border-radius:6px;top:4px;
+  }
+  .arm-left{left:-7px;animation:armSwing 5s ease-in-out infinite}
+  .arm-right{right:-7px;animation:armSwing 5s ease-in-out infinite .4s}
+  @keyframes armSwing{0%,100%{transform:rotate(3deg)}50%{transform:rotate(-3deg)}}
+
+  /* Ground */
+  .ground{
+    position:absolute;bottom:0;left:10%;right:10%;height:30px;
+    background:linear-gradient(180deg,#f1f3f4,#e8eaed);
+    border-radius:50%;
+    filter:blur(1px);
+  }
+
+  /* Status badge */
+  .status-badge{
+    display:inline-flex;align-items:center;gap:8px;
+    background:rgba(52,168,83,.08);border:1px solid rgba(52,168,83,.2);
+    border-radius:100px;padding:6px 18px;margin-bottom:20px;
+    font-size:12px;color:#34a853;letter-spacing:.3px;
+    text-transform:uppercase;font-weight:500;
+  }
+  .status-dot{
+    width:7px;height:7px;border-radius:50%;background:#34a853;
+    animation:dotPulse 2s ease-in-out infinite;
+  }
+  @keyframes dotPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
+
+  h1{
+    font-size:1.6rem;font-weight:500;color:#202124;
+    margin-bottom:10px;line-height:1.3;
+  }
+
+  .subtitle{
+    color:#5f6368;font-size:.9rem;
+    line-height:1.6;max-width:400px;margin:0 auto;
+  }
+
+  .gcloud{
+    display:inline-flex;align-items:center;gap:6px;
+    margin-top:32px;color:#9aa0a6;font-size:.75rem;
+    letter-spacing:.3px;
+  }
+  /* Google Cloud icon - 4 color dots */
+  .g-dots{display:flex;gap:3px;align-items:center}
+  .g-dot{width:5px;height:5px;border-radius:50%}
+  .g-dot:nth-child(1){background:#4285f4}
+  .g-dot:nth-child(2){background:#ea4335}
+  .g-dot:nth-child(3){background:#fbbc04}
+  .g-dot:nth-child(4){background:#34a853}
+</style>
 </head>
-
 <body>
-  <div class="container">
-    <div>
-      <div class="sect1">
-        <h2 id="_health_check_booster">Health Check Booster</h2>
-        <div class="sectionbody">
-          <div class="paragraph">
-            <p>Demonstrates how the Kubernetes/Openshift 4 health checks work to determine if a container is still alive (the <em>liveness</em>
-              of the container) and ready to serve the traffic for the HTTP endpoints of the application (the <em>readiness</em>
-              of the container).</p>
-          </div>
-          <div class="paragraph">
-            <p>To demonstrate this behavior, the application configures a <code>/health</code> HTTP endpoint, which is
-              used
-              by Kubernetes/Openshift to issue HTTP requests. If the container is still alive—​which means the Health HTTP
-              endpoint
-              is able to reply—​the management platform will receive HTTP code 200 as a response, and no further action
-              is taken. After you click the
-              <code>Stop Service</code> button, the HTTP endpoint starts
-              returning a 500 response, and the platform then
-              restarts
-              the pod with the failed container. While the pod is down, the booster UI polls the service
-              periodically
-              until the pod is restarted. In the meantime, do <strong>not</strong> refresh the page because it will
-              not be served until the pod finishes restarting.</p>
-          </div>
-          <div class="sect2">
-            <h3 id="_using_the_greeting_service">Using the greeting service</h3>
-          </div>
-        </div>
-      </div>
 
-      <form class="form-inline">
-        <div class="form-group">
-          <label for="name">Name</label>
-          <input type="text" class="form-control" id="name" placeholder="World">
-        </div>
-        <button id="invoke" type="submit" class="btn btn-success">Invoke</button>
-        <button id="stop" type="submit" class="btn btn-danger">Stop Service</button>
-      </form>
+<div class="container">
+  <div class="scene">
+    <!-- Subtle stars -->
+    <div class="star" style="width:3px;height:3px;top:10%;left:15%;--d:3s;--o:.4"></div>
+    <div class="star" style="width:2px;height:2px;top:25%;left:50%;--d:4s;--o:.3"></div>
+    <div class="star" style="width:3px;height:3px;top:8%;left:72%;--d:2.5s;--o:.5"></div>
+    <div class="star" style="width:2px;height:2px;top:35%;left:8%;--d:3.5s;--o:.3"></div>
+    <div class="star" style="width:2px;height:2px;top:18%;left:90%;--d:4.5s;--o:.4"></div>
 
-      <h3>Result:</h3>
-      <pre><code id="greeting-result">Invoke the service to see the result.</code></pre>
+    <!-- Planet -->
+    <div class="planet">
+      <div class="crater"></div>
+      <div class="crater"></div>
+      <div class="crater"></div>
     </div>
+
+    <!-- Rocket -->
+    <div class="rocket">
+      <div class="rocket-body">
+        <div class="fin fin-left"></div>
+        <div class="fin fin-right"></div>
+        <div class="flame"></div>
+      </div>
+    </div>
+
+    <!-- Astronaut -->
+    <div class="astronaut">
+      <div class="helmet"><div class="visor"></div></div>
+      <div class="torso">
+        <div class="panel">
+          <div class="light"></div>
+          <div class="light"></div>
+          <div class="light-bar"></div>
+        </div>
+        <div class="arm arm-left"></div>
+        <div class="arm arm-right"></div>
+      </div>
+    </div>
+
+    <!-- Ground -->
+    <div class="ground"></div>
   </div>
 
-  <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
-  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa"
-    crossorigin="anonymous"></script>
+  <div class="status-badge">
+    <div class="status-dot"></div>
+    Active
+  </div>
 
-  <script>
-    var stopTime;
-    var attempts;
+  <h1>Your development environment is running</h1>
+  <p class="subtitle">Powered by Google Cloud Spaces</p>
 
-    function invokeService() {
-      var n = $("#name").val() || "World";
-      $.get("/api/greeting?name=" + n, function (res) {
-        $("#greeting-result").html(res);
-      });
-    }
+  <div class="gcloud">
+    <div class="g-dots">
+      <div class="g-dot"></div>
+      <div class="g-dot"></div>
+      <div class="g-dot"></div>
+      <div class="g-dot"></div>
+    </div>
+    Google Cloud
+  </div>
+</div>
 
-    function invokeServiceandRetryUponFailures() {
-      var n = $("#name").val() || "World";
-      $.get("/api/greeting?name=" + n, function (res) {
-          var rebirth = new Date();
-          var diff = (stopTime.getTime() - rebirth.getTime()) / 1000;
-          var abs = Math.abs(diff);
-          $("#greeting-result").html(res + " (the recovery took " + abs + " seconds)");
-      })
-      .fail(function () {
-        $("#greeting-result").html("[" + ++attempts + "] Service not available... Retrying in 2 seconds");
-        setTimeout(invokeServiceandRetryUponFailures, 2000);
-      });
-    }
-
-    $(document).ready(function () {
-      $("#invoke").click(function (e) {
-        invokeService();
-        e.preventDefault();
-      });
-
-      $("#stop").click(function (e) {
-        $.get("/api/stop", function (data) {
-          $("#greeting-result").html("The application has been stopped...");
-          stopTime = new Date();
-          attempts = 0;
-          setTimeout(invokeServiceandRetryUponFailures, 2000);
-        });
-        e.preventDefault();
-      });
-    });
-  </script>
 </body>
 </html>
