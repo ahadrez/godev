@@ -43,7 +43,7 @@ steps:
         set -euo pipefail
         TOKEN=$(gcloud secrets versions access latest --secret=github-token 2>/dev/null) || {
           echo "No github-token secret found - skipping GitOps manifest update."
-          echo "Image ${_IMAGE}:${SHORT_SHA} was pushed; bump config-sync/deployment.yaml manually."
+          echo "Image ${_IMAGE}:${SHORT_SHA} was pushed; bump newTag in config-sync/kustomization.yaml manually."
           exit 0
         }
         git clone --depth 1 "https://x-access-token:$${TOKEN}@${_CONFIG_REPO}.git" /workspace/cfg

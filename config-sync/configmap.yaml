@@ -5,4 +5,4 @@ metadata:
   namespace: godev
 data:
   # Environment name shown on the app page: development | test | production
-  APP_ENV: production
+  APP_ENV: TEST
