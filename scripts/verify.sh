@@ -35,7 +35,9 @@ kubectl rollout status deployment/godev -n "$NAMESPACE" --timeout=5m
 log "Current state"
 kubectl get pods,svc,configmap -n "$NAMESPACE"
 echo
-echo "APP_ENV in ConfigMap: $(kubectl get configmap godev-config -n "$NAMESPACE" -o jsonpath='{.data.APP_ENV}')"
+# ConfigMap name carries a kustomize content-hash suffix; resolve it via the deployment's reference
+CM_NAME=$(kubectl get deployment godev -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].configMapRef.name}')
+echo "APP_ENV in ConfigMap ($CM_NAME): $(kubectl get configmap "$CM_NAME" -n "$NAMESPACE" -o jsonpath='{.data.APP_ENV}')"
 echo "Image: $(kubectl get deployment godev -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
 log "Waiting for LoadBalancer external IP (up to 5 min)"

@@ -135,8 +135,8 @@ gcloud builds submit "$REPO_ROOT" \
 log "Pinning image tag and APP_ENV in config-sync manifests"
 sed -i '' -E "s|newTag: .*|newTag: ${SHORT_SHA}|" "$REPO_ROOT/config-sync/kustomization.yaml" 2>/dev/null || \
   sed -i -E "s|newTag: .*|newTag: ${SHORT_SHA}|" "$REPO_ROOT/config-sync/kustomization.yaml"
-sed -i '' -E "s|(APP_ENV: ).*|\1${APP_ENV}|" "$REPO_ROOT/config-sync/configmap.yaml" 2>/dev/null || \
-  sed -i -E "s|(APP_ENV: ).*|\1${APP_ENV}|" "$REPO_ROOT/config-sync/configmap.yaml"
+sed -i '' -E "s|APP_ENV=.*|APP_ENV=${APP_ENV}|" "$REPO_ROOT/config-sync/kustomization.yaml" 2>/dev/null || \
+  sed -i -E "s|APP_ENV=.*|APP_ENV=${APP_ENV}|" "$REPO_ROOT/config-sync/kustomization.yaml"
 
 if [ "$PUSH_CONFIG" = "true" ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- config-sync/)" ]; then
   log "Committing and pushing manifest changes (Config Sync reads from GitHub)"

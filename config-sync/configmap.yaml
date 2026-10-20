@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: godev-config
-  namespace: godev
-data:
-  # Environment name shown on the app page: development | test | production
-  APP_ENV: development

@@ -3,9 +3,17 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
-  - configmap.yaml
   - deployment.yaml
   - service.yaml
+
+# Generated with a content-hash name suffix: any change here renames the
+# ConfigMap, which changes the pod template and rolls the pods automatically.
+configMapGenerator:
+  - name: godev-config
+    namespace: godev
+    literals:
+      # Environment name shown on the app page: development | test | production
+      - APP_ENV=test
 
 # Image tag pinned by CI (cloudbuild.yaml update-manifests step)
 images:
