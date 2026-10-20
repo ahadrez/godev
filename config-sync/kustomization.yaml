@@ -10,4 +10,4 @@ resources:
 # Image tag pinned by CI (cloudbuild.yaml update-manifests step)
 images:
   - name: us-central1-docker.pkg.dev/udc-cloud-architect-poc/godev/godev
-    newTag: 4c781f8
+    newTag: 92d1761
