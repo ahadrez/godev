@@ -25,7 +25,7 @@ REPO_OWNER="${REPO_OWNER:-ahadrez}"
 REPO_NAME="${REPO_NAME:-godev}"
 SYNC_REPO="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 SYNC_BRANCH="${SYNC_BRANCH:-main}"
-POLICY_DIR="${POLICY_DIR:-config-sync}"
+POLICY_DIR="${POLICY_DIR:-platform}"   # RootSync (platform team); it provisions a RepoSync for config-sync/ (app team)
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/godev"
 PUSH_CONFIG="${PUSH_CONFIG:-true}"   # set false to skip git commit/push of manifests
 

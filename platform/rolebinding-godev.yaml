@@ -1,0 +1,15 @@
+# Grants the godev RepoSync's reconciler permission to manage objects in the
+# godev namespace (namespace-scoped admin, no cluster-level rights).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: repo-sync-admin
+  namespace: godev
+subjects:
+  - kind: ServiceAccount
+    name: ns-reconciler-godev
+    namespace: config-management-system
+roleRef:
+  kind: ClusterRole
+  name: admin
+  apiGroup: rbac.authorization.k8s.io

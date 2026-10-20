@@ -1,0 +1,15 @@
+# Application team's sync: namespace-scoped, limited to the godev namespace.
+# The platform team (this RootSync-managed directory) provisions it; the app
+# team owns everything under config-sync/.
+apiVersion: configsync.gke.io/v1beta1
+kind: RepoSync
+metadata:
+  name: repo-sync
+  namespace: godev
+spec:
+  sourceFormat: unstructured
+  git:
+    repo: https://github.com/ahadrez/godev
+    branch: main
+    dir: config-sync
+    auth: none
