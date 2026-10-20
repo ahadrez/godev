@@ -12,7 +12,7 @@ configMapGenerator:
     namespace: godev
     literals:
       # Environment name shown on the app page: development | test | production
-      - APP_ENV=production
+      - APP_ENV=test
 
 # Image tag pinned by CI (cloudbuild.yaml update-manifests step)
 images:
