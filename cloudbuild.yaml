@@ -1,0 +1,64 @@
+# CI pipeline: build the app image, push it to Artifact Registry, then pin the
+# new image tag into the Config Sync manifests (GitOps). Config Sync on the GKE
+# Autopilot cluster picks up the commit and rolls out the deployment.
+#
+# The manifest-update step needs a GitHub PAT stored in Secret Manager as
+# "github-token" (repo scope). If the secret is absent the step skips cleanly
+# and the build still succeeds (image is pushed, manifests just aren't bumped).
+#
+# NOTE: the Cloud Build trigger must set ignoredFiles on config-sync/** so the
+# manifest-bump commit does not retrigger the pipeline (the setup script does this).
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: godev
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/godev
+  _CONFIG_REPO: github.com/ahadrez/godev
+
+options:
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, "${_IMAGE}"]
+
+  - id: update-manifests
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        TOKEN=$(gcloud secrets versions access latest --secret=github-token 2>/dev/null) || {
+          echo "No github-token secret found - skipping GitOps manifest update."
+          echo "Image ${_IMAGE}:${SHORT_SHA} was pushed; bump config-sync/deployment.yaml manually."
+          exit 0
+        }
+        git clone --depth 1 "https://x-access-token:$${TOKEN}@${_CONFIG_REPO}.git" /workspace/cfg
+        cd /workspace/cfg
+        sed -i -E "s|(image: ${_IMAGE}:).*|\1${SHORT_SHA}|" config-sync/deployment.yaml
+        if git diff --quiet; then
+          echo "Manifest already at ${SHORT_SHA}; nothing to commit."
+          exit 0
+        fi
+        git config user.name  "cloud-build-bot"
+        git config user.email "cloud-build-bot@noreply.google.com"
+        git commit -am "ci: deploy godev ${SHORT_SHA}"
+        git push origin main
+        echo "Config Sync manifest bumped to ${SHORT_SHA}."
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest

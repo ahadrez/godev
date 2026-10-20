@@ -189,8 +189,19 @@
 
   h1{
     font-size:1.6rem;font-weight:500;color:#202124;
-    margin-bottom:10px;line-height:1.3;
+    margin-bottom:8px;line-height:1.3;
   }
+
+  /* Environment name, shown under the title */
+  .env-label{
+    display:inline-block;
+    font-size:1rem;font-weight:700;
+    letter-spacing:1px;text-transform:uppercase;
+    color:#4285f4;margin-bottom:12px;
+  }
+  .env-label.env-production{color:#34a853}
+  .env-label.env-test{color:#f9ab00}
+  .env-label.env-development{color:#4285f4}
 
   .subtitle{
     color:#5f6368;font-size:.9rem;
@@ -261,8 +272,9 @@
     Active
   </div>
 
-  <h1>Your development environment is running</h1>
-  <p class="subtitle">Powered by Google Cloud Spaces</p>
+  <h1>Your development is running</h1>
+  <div class="env-label env-{{.Env}}">{{.Env}}</div>
+  <p class="subtitle">Powered by Google Cloud</p>
 
   <div class="gcloud">
     <div class="g-dots">
