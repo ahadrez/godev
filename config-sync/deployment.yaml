@@ -17,8 +17,8 @@ spec:
     spec:
       containers:
         - name: godev
-          # Tag is pinned by Cloud Build (cloudbuild.yaml update-manifests step)
-          image: us-central1-docker.pkg.dev/udc-cloud-architect-poc/godev/godev:6bb6d3a
+          # Tag is injected by kustomize (see kustomization.yaml images)
+          image: us-central1-docker.pkg.dev/udc-cloud-architect-poc/godev/godev
           ports:
             - containerPort: 8080
           envFrom:

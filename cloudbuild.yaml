@@ -48,7 +48,7 @@ steps:
         }
         git clone --depth 1 "https://x-access-token:$${TOKEN}@${_CONFIG_REPO}.git" /workspace/cfg
         cd /workspace/cfg
-        sed -i -E "s|(image: ${_IMAGE}:).*|\1${SHORT_SHA}|" config-sync/deployment.yaml
+        sed -i "s|newTag: .*|newTag: ${SHORT_SHA}|" config-sync/kustomization.yaml
         if git diff --quiet; then
           echo "Manifest already at ${SHORT_SHA}; nothing to commit."
           exit 0
