@@ -72,7 +72,7 @@ log "Fleet membership: $MEMBERSHIP"
 
 # ---------- 4. Config Sync ----------
 log "Enabling Config Management and applying Config Sync spec"
-gcloud container fleet config-management enable --project "$PROJECT_ID"
+gcloud beta container fleet config-management enable --project "$PROJECT_ID"
 
 APPLY_SPEC=$(mktemp)
 cat > "$APPLY_SPEC" <<EOF
