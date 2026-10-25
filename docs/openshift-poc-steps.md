@@ -1,75 +1,90 @@
-# OpenShift POC — Exact Steps
+# PoC Runbook — OpenShift + Google Secret Manager via Secrets Store CSI
 
-The minimal path to mount a GCP Secret Manager secret in an OpenShift pod.
-Reuses the existing POC project (`udc-cloud-architect-poc`) and secret
-(`godev-demo`). Full design rationale: [`openshift-landing-zone-runbook.md`](openshift-landing-zone-runbook.md).
+**Scope:** one non-production on-prem OpenShift cluster, one test secret, one
+test application pod. No Kubernetes Secret synchronization; no Google
+service-account JSON keys; no changes to the OpenShift OIDC issuer. The
+open-source GCP provider authenticates with one shared, keyless WIF identity.
+**This gives per-cluster, not per-application, IAM isolation — do not promote
+to production unchanged** (production guardrails:
+[`openshift-landing-zone-runbook.md`](openshift-landing-zone-runbook.md)).
 
-**Prerequisites:** cluster-admin on a disposable/dev OpenShift cluster; nodes
-can reach `sts.googleapis.com` and `secretmanager.googleapis.com` on 443;
-`gcloud` + `oc` on your workstation.
+This runbook is self-contained: every manifest is inline. It has not been
+executed against your cluster — expect to adapt SCC/SELinux details (§4).
 
-**Variables used throughout:**
+## Prerequisites
 
-```bash
-export PROJECT_ID=udc-cloud-architect-poc
-export PROJECT_NUMBER=148538518928
-export POOL=ocp-poc-pool
-export WIF_PROVIDER=ocp-poc-cluster
-```
+- OpenShift version with a supported Red Hat **Secrets Store CSI Driver
+  Operator** in OperatorHub. Cluster-admin access (operator install + SCC grant).
+- `gcloud` with permission to enable services, create WIF pools/providers,
+  manage Secret Manager and IAM; `oc`, `jq`, `curl`, `sed`.
+- Worker-node/provider-pod HTTPS connectivity to `sts.googleapis.com` and
+  `secretmanager.googleapis.com` (approved proxy or private Google API
+  routing). The IAM Credentials API is **not** needed for direct WIF. Mirror
+  the provider and test images internally if external registries are blocked.
+- A Bash shell with `gcloud` and `oc` pointed at the intended test project and
+  cluster.
 
----
-
-## Part 1 — ON OPENSHIFT: export the cluster's signing keys (read-only)
-
-```bash
-oc get --raw /openid/v1/jwks > keys.json
-# the issuer URL the cluster stamps into its tokens (keep as-is, no patch needed):
-export ISSUER=$(oc get --raw /.well-known/openid-configuration | jq -r .issuer)
-echo $ISSUER
-```
-
-No cluster changes required: per the
-[official WIF-with-Kubernetes flow](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes),
-the JWKS is uploaded directly to the workload identity provider
-(`--jwk-json-path`), so the issuer never has to be publicly reachable and the
-cluster keeps its existing `serviceAccountIssuer`.
-
-> **Key rotation:** Google validates against the *uploaded* keys. When the
-> cluster rotates its SA signing keys, re-run Part 1 and
-> `gcloud iam workload-identity-pools providers update-oidc $WIF_PROVIDER
-> --jwk-json-path keys.json ...` — worth a reminder or a small CronJob.
-
-## Part 2 — ON GCP: trust the cluster
+## 1. Variables and OIDC information
 
 ```bash
-# 2.1 Workload identity pool + provider for this cluster (JWKS uploaded, no bucket)
-gcloud iam workload-identity-pools create $POOL \
-  --project $PROJECT_ID --location global
-gcloud iam workload-identity-pools providers create-oidc $WIF_PROVIDER \
-  --project $PROJECT_ID --location global \
-  --workload-identity-pool $POOL \
-  --issuer-uri "${ISSUER}" \
-  --jwk-json-path keys.json \
-  --allowed-audiences "https://secretmanager.ocp-poc" \
-  --attribute-mapping "google.subject=assertion.sub"
+export PROJECT_ID='udc-cloud-architect-poc'            # or your test project
+export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+export POOL='ocp-csi-poc'
+export PROVIDER='ocp-lab1'
+export PROVIDER_NS='csi-poc-system'
+export APP_NS='csi-poc'
+export POC_AUDIENCE='https://ocp-csi-poc.example.invalid'
 
-# 2.2 Grant the provider's future identity access to the ONE secret
-gcloud secrets add-iam-policy-binding godev-demo --project $PROJECT_ID \
-  --role roles/secretmanager.secretAccessor \
-  --member "principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:secrets-store:csi-provider-gcp"
+export ISSUER="$(oc get --raw /.well-known/openid-configuration | jq -r '.issuer')"
+oc get --raw /openid/v1/jwks > cluster-jwks.json
+printf 'Issuer: %s\n' "$ISSUER"
 ```
 
-Multi-cluster note: default on-prem issuers are often the identical string
-(`https://kubernetes.default.svc`), and issuer URIs must be distinguishable
-per provider — for a second cluster, give it a distinct issuer or pool. For a
-single-cluster POC this doesn't matter.
+If the issuer is not HTTPS or looks unexpected, stop and review the cluster's
+token configuration — do **not** patch `serviceAccountIssuer`. Google accepts
+an uploaded JWKS for private clusters
+([official guide](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes)),
+so no public OIDC bucket is needed. Re-upload the JWKS if the cluster's
+signing keys rotate (`gcloud iam workload-identity-pools providers update-oidc
+... --jwk-json-path cluster-jwks.json`).
 
-## Part 3 — ON OPENSHIFT: everything else
+## 2. GCP: secret + workload identity federation
 
-### 3.1 Install the Secrets Store CSI Driver operator
+```bash
+gcloud services enable iam.googleapis.com sts.googleapis.com secretmanager.googleapis.com \
+  --project="$PROJECT_ID"
 
-Easiest: **web console → OperatorHub → "Secrets Store CSI driver" → Install**
-(all defaults). Then enable the driver:
+printf '%s' 'POC-DEMO-VALUE-NOT-PRODUCTION' | \
+  gcloud secrets create csi-poc-password --project="$PROJECT_ID" \
+    --replication-policy=automatic --data-file=-
+
+gcloud iam workload-identity-pools create "$POOL" \
+  --project="$PROJECT_ID" --location=global --display-name='OpenShift CSI PoC'
+
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$POOL" \
+  --issuer-uri="$ISSUER" \
+  --allowed-audiences="$POC_AUDIENCE" \
+  --attribute-mapping='google.subject=assertion.sub' \
+  --attribute-condition="assertion.sub == 'system:serviceaccount:${PROVIDER_NS}:secrets-store-csi-driver-provider-gcp'" \
+  --jwk-json-path=cluster-jwks.json
+
+gcloud secrets add-iam-policy-binding csi-poc-password \
+  --project="$PROJECT_ID" \
+  --role='roles/secretmanager.secretAccessor' \
+  --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:${PROVIDER_NS}:secrets-store-csi-driver-provider-gcp"
+```
+
+The binding grants access **only to the test secret**, and the attribute
+condition means only the provider's exact ServiceAccount can federate at all.
+The provider still shares that identity across all workloads it serves — it is
+not an application isolation boundary.
+
+## 3. OpenShift: install the Red Hat driver
+
+In OperatorHub install **Secrets Store CSI Driver Operator** (Red Hat) into
+its default namespace `openshift-cluster-csi-drivers`, then enable the driver
+and wait for it to reconcile:
 
 ```bash
 oc apply -f - <<'EOF'
@@ -80,150 +95,207 @@ metadata:
 spec:
   managementState: Managed
 EOF
-oc get pods -n openshift-cluster-csi-drivers   # driver DaemonSet pods Running
+
+oc get csidriver secrets-store.csi.k8s.io
+oc get clustercsidriver secrets-store.csi.k8s.io
+oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io
 ```
 
-### 3.2 Deploy the GCP provider (keyless, via the WIF config)
+The CSI driver is Red Hat–managed; the **GCP provider below is separate
+open-source software**.
+
+## 4. OpenShift: install the Google provider DaemonSet
 
 ```bash
-oc new-project secrets-store
-oc apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: csi-provider-gcp
-  namespace: secrets-store
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gcp-wif-credentials
-  namespace: secrets-store
-data:
-  config: |
-    {
-      "type": "external_account",
-      "audience": "//iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/providers/${WIF_PROVIDER}",
-      "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-      "token_url": "https://sts.googleapis.com/v1/token",
-      "credential_source": { "file": "/var/run/secrets/tokens/gcp-ksa/token" }
-    }
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: csi-provider-gcp
-  namespace: secrets-store
+oc get namespace "$PROVIDER_NS" >/dev/null 2>&1 || oc create namespace "$PROVIDER_NS"
+oc get namespace "$APP_NS"      >/dev/null 2>&1 || oc create namespace "$APP_NS"
+
+# Upstream manifest, moved out of kube-system
+curl -fsSLo provider-upstream.yaml \
+  https://raw.githubusercontent.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp/main/deploy/provider-gcp-plugin.yaml
+sed "s/namespace: kube-system/namespace: ${PROVIDER_NS}/g" \
+  provider-upstream.yaml > provider-poc.yaml
+oc apply -f provider-poc.yaml
+
+# Narrower than privileged, but still sensitive (hostPath + any UID).
+oc adm policy add-scc-to-user hostmount-anyuid \
+  -z secrets-store-csi-driver-provider-gcp -n "$PROVIDER_NS"
+```
+
+The upstream plugin uses a hostPath socket and an init container that changes
+its ownership. `hostmount-anyuid` may suffice, but SELinux/admission behavior
+differs between clusters — if pods are rejected or socket writes are denied,
+inspect the actual denial before escalating the SCC, and never add
+`privileged` outside this disposable PoC namespace.
+
+### 4b. Configure the provider's keyless credentials
+
+```bash
+# Official generator for the external_account config (contains NO secrets)
+gcloud iam workload-identity-pools create-cred-config \
+  "projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/providers/${PROVIDER}" \
+  --credential-source-file='/var/run/wif/token' \
+  --credential-source-type=text \
+  --output-file=credentials.json
+
+oc -n "$PROVIDER_NS" create configmap csi-wif \
+  --from-file=credentials.json=credentials.json
+
+# Inject the projected token + credential file into the provider DaemonSet
+oc -n "$PROVIDER_NS" patch daemonset csi-secrets-store-provider-gcp \
+  --type=strategic --patch "$(cat <<EOF
 spec:
-  selector: { matchLabels: { app: csi-provider-gcp } }
   template:
-    metadata: { labels: { app: csi-provider-gcp } }
     spec:
-      serviceAccountName: csi-provider-gcp
       containers:
         - name: provider
-          # pick the latest release: github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp/releases
-          image: us-docker.pkg.dev/secretmanager-csi/secrets-store-csi-driver-provider-gcp/plugin:v1.8.0
-          args: ["-provider_volume=/provider"]
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: /var/run/secrets/tokens/gcp-ksa/google-application-credentials.json
+              value: /var/run/wif/credentials.json
           volumeMounts:
-            - { name: providervol, mountPath: /provider }
-            - { name: gcp-ksa, mountPath: /var/run/secrets/tokens/gcp-ksa, readOnly: true }
-          securityContext: { privileged: true }
+            - name: wif
+              mountPath: /var/run/wif
+              readOnly: true
       volumes:
-        - name: providervol
-          hostPath: { path: /var/run/secrets-store-csi-providers }   # where the RH driver looks for provider sockets
-        - name: gcp-ksa
+        - name: wif
           projected:
             sources:
               - serviceAccountToken:
-                  audience: "https://secretmanager.ocp-poc"     # = --allowed-audiences in 2.2
+                  audience: ${POC_AUDIENCE}
                   expirationSeconds: 3600
                   path: token
               - configMap:
-                  name: gcp-wif-credentials
-                  items: [{ key: config, path: google-application-credentials.json }]
+                  name: csi-wif
+                  items:
+                    - key: credentials.json
+                      path: credentials.json
 EOF
+)"
 
-# provider needs hostPath + privileged:
-oc adm policy add-scc-to-user privileged -z csi-provider-gcp -n secrets-store
-oc -n secrets-store get pods    # Running on every node
+oc -n "$PROVIDER_NS" rollout status daemonset/csi-secrets-store-provider-gcp --timeout=180s
+oc -n "$PROVIDER_NS" get pods -o wide
 ```
 
-### 3.3 Deploy the test app (godev manifests, two strings changed)
+`credentials.json` is a non-secret external-account *configuration*, not a
+key: it tells the Google client library to read the projected, auto-rotating
+ServiceAccount token at `/var/run/wif/token` and exchange it at STS. The token
+audience must equal `--allowed-audiences` from §2.
+
+## 5. SecretProviderClass and test pod
 
 ```bash
-oc new-project godev
 oc apply -f - <<EOF
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: godev-secrets
-  namespace: godev
+  name: csi-poc
+  namespace: ${APP_NS}
 spec:
-  provider: gcp                                    # GKE POC had: gke
+  provider: gcp
   parameters:
     secrets: |
-      - resourceName: "projects/${PROJECT_ID}/secrets/godev-demo/versions/latest"
-        path: "godev-demo"
+      - resourceName: "projects/${PROJECT_ID}/secrets/csi-poc-password/versions/latest"
+        path: "password"
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
-  name: godev
-  namespace: godev
+  name: csi-demo
+  namespace: ${APP_NS}
 spec:
-  replicas: 1
-  selector: { matchLabels: { app: godev } }
-  template:
-    metadata: { labels: { app: godev } }
-    spec:
-      containers:
-        - name: godev
-          image: us-central1-docker.pkg.dev/${PROJECT_ID}/godev/godev:644bffb
-          ports: [{ containerPort: 8080 }]
-          env:
-            - { name: APP_ENV, value: openshift-poc }
-            - { name: SECRET_FILE, value: /var/secrets/godev-demo }
-          volumeMounts:
-            - { name: gcp-secrets, mountPath: /var/secrets, readOnly: true }
-      volumes:
-        - name: gcp-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io        # GKE POC had: secrets-store-gke.csi.k8s.io
-            readOnly: true
-            volumeAttributes: { secretProviderClass: godev-secrets }
+  containers:
+    - name: demo
+      image: registry.access.redhat.com/ubi9/ubi-minimal
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: secrets
+          mountPath: /mnt/secrets
+          readOnly: true
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: csi-poc
 EOF
+
+oc -n "$APP_NS" get pods -w
 ```
 
-**Image pull:** the godev image lives in Artifact Registry. For the POC either
-make the repo public (`gcloud artifacts repositories add-iam-policy-binding
-godev --location us-central1 --member allUsers --role
-roles/artifactregistry.reader`) or create a pull secret; or swap in any public
-image and just `cat` the file to verify.
-
-## Part 4 — Verify
+When the pod is Running:
 
 ```bash
-oc -n godev get pods                                   # 1/1 Running
-oc -n godev get secrets                                # nothing app-related → not in etcd
-oc -n godev port-forward deploy/godev 8080:8080        # page shows "Loaded" + masked value
-# rotation (OSS driver re-fetches without restart if rotation is enabled):
-printf '%s' 'ocp-rotated' | gcloud secrets versions add godev-demo --data-file=- --project $PROJECT_ID
+# Confirm the mount without printing the secret to terminals or logs
+oc -n "$APP_NS" exec csi-demo -- ls -l /mnt/secrets
+oc -n "$APP_NS" exec csi-demo -- test -s /mnt/secrets/password && echo 'CSI mount OK'
+
+# Expect NotFound — the value must NOT exist as a Kubernetes Secret
+oc -n "$APP_NS" get secret csi-poc-password
 ```
 
-**If the pod is stuck `ContainerCreating`:** `oc -n godev describe pod` —
-`PermissionDenied` → the IAM principal in 2.2 doesn't match the token `sub`;
-`connection refused`/socket errors → provider DaemonSet or SCC (3.2);
-`invalid_grant`/issuer errors → bucket contents or the audience mismatch
-(2.1 vs 3.2).
+Do not add `secretObjects:` / Secret sync to the SecretProviderClass — keeping
+the value out of etcd is the point.
 
-## Cleanup (GCP side)
+**Optional:** deploy the `godev` app instead of the bare pod (visual masked
+proof) — its Deployment from the GKE POC works verbatim with
+`driver: secrets-store.csi.k8s.io`, `provider: gcp`, and
+`SECRET_FILE=/mnt/secrets/password`; mirror or make its Artifact Registry
+image pullable first.
+
+## 6. Troubleshooting
 
 ```bash
-gcloud iam workload-identity-pools delete $POOL --location global --project $PROJECT_ID
-gcloud secrets remove-iam-policy-binding godev-demo --project $PROJECT_ID \
-  --role roles/secretmanager.secretAccessor --member "principal://...(same as 2.2)"
+oc -n "$APP_NS" describe pod csi-demo
+oc -n "$PROVIDER_NS" logs daemonset/csi-secrets-store-provider-gcp --tail=100
+oc get events -n "$APP_NS" --sort-by=.lastTimestamp | tail -20
 ```
+
+- `PermissionDenied` → the IAM principal (§2) vs the token `sub`; the
+  attribute condition; stale uploaded JWKS.
+- STS `invalid_grant` / issuer errors → issuer mismatch, stale JWKS, or the
+  projected token audience ≠ `--allowed-audiences`.
+- Connection timeout / TLS → DNS, proxy, CA trust, firewall for STS and
+  Secret Manager **from the provider pods**, not just your laptop.
+- `FailedMount` / socket unavailable → CSI driver pods, provider DaemonSet
+  placement, hostPath SCC / SELinux.
+- `ImagePullBackOff` → mirror the provider image (and ubi-minimal) internally
+  and point the manifests at the mirror.
+
+## Exit criteria
+
+1. Red Hat CSI driver and GCP provider DaemonSets healthy on the test pod's node.
+2. Test pod mounts `/mnt/secrets/password` with nonzero content.
+3. No Kubernetes Secret containing the value exists (etcd clean).
+4. Authentication used only short-lived federated credentials — no Google
+   service-account JSON key anywhere.
+
+## Cleanup
+
+```bash
+oc -n "$APP_NS" delete pod csi-demo --ignore-not-found
+oc -n "$APP_NS" delete secretproviderclass csi-poc --ignore-not-found
+oc adm policy remove-scc-from-user hostmount-anyuid \
+  -z secrets-store-csi-driver-provider-gcp -n "$PROVIDER_NS"
+oc delete -f provider-poc.yaml --ignore-not-found
+oc delete namespace "$APP_NS" "$PROVIDER_NS" --ignore-not-found
+
+gcloud secrets delete csi-poc-password --project="$PROJECT_ID" --quiet
+gcloud iam workload-identity-pools providers delete "$PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$POOL" --quiet
+gcloud iam workload-identity-pools delete "$POOL" \
+  --project="$PROJECT_ID" --location=global --quiet
+```
+
+Cleanup intentionally does **not** remove the shared Red Hat CSI operator or
+`ClusterCSIDriver` — remove those only if nothing else uses them. Deletion is
+destructive; re-check the variables first.
+
+## References
+
+- Red Hat OpenShift CSI docs: https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/storage/using-container-storage-interface-csi
+- Google self-hosted Kubernetes WIF: https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes
+- GCP provider authentication modes: https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp/blob/main/docs/authentication.md
+- GCP provider upstream manifest: https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp/blob/main/deploy/provider-gcp-plugin.yaml
+- Production design + guardrails: [`openshift-landing-zone-runbook.md`](openshift-landing-zone-runbook.md)
+- GKE POC this builds on: [`secret-manager-poc.md`](secret-manager-poc.md)
