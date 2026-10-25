@@ -4,6 +4,8 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
+  - serviceaccount.yaml
+  - secretproviderclass.yaml
 
 # Generated with a content-hash name suffix: any change here renames the
 # ConfigMap, which changes the pod template and rolls the pods automatically.
@@ -13,6 +15,8 @@ configMapGenerator:
     literals:
       # Environment name shown on the app page: development | test | production
       - APP_ENV=production
+      # Where the CSI driver mounts the demo secret (see secretproviderclass.yaml)
+      - SECRET_FILE=/var/secrets/godev-demo
 
 # Image tag pinned by CI (cloudbuild.yaml update-manifests step)
 images:

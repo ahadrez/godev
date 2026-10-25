@@ -510,6 +510,61 @@
       margin: 0 auto;
     }
 
+    /* Secret Manager status card */
+    .secret-card {
+      margin: 24px auto 0;
+      max-width: 420px;
+      border: 1px solid #e8eaed;
+      border-radius: 12px;
+      padding: 14px 20px;
+      text-align: left;
+      font-size: .8rem;
+      color: #5f6368;
+      background: #fafbfc;
+    }
+
+    .secret-card .secret-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+      color: #202124;
+      margin-bottom: 8px;
+      font-size: .85rem;
+    }
+
+    .secret-pill {
+      font-size: .65rem;
+      font-weight: 700;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      border-radius: 100px;
+      padding: 2px 10px;
+    }
+
+    .secret-pill.ok {
+      color: #34a853;
+      background: rgba(52, 168, 83, .1);
+    }
+
+    .secret-pill.missing {
+      color: #ea4335;
+      background: rgba(234, 67, 53, .1);
+    }
+
+    .secret-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 2px 0;
+    }
+
+    .secret-row code {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      color: #202124;
+      word-break: break-all;
+    }
+
     .gcloud {
       display: inline-flex;
       align-items: center;
@@ -606,6 +661,25 @@
     <h1>Your Ok application is deployed and running in </h1>
     <div class="env-label env-{{.Env}}">{{.Env}}</div>
     <p class="subtitle">Powered by Google Cloud</p>
+
+    <div class="secret-card">
+      <div class="secret-title">
+        Google Cloud Secret Manager
+        {{if .Secret.Loaded}}
+        <span class="secret-pill ok">Loaded</span>
+        {{else}}
+        <span class="secret-pill missing">Not mounted</span>
+        {{end}}
+      </div>
+      {{if .Secret.Loaded}}
+      <div class="secret-row"><span>Value (masked)</span><code>{{.Secret.Masked}}</code></div>
+      <div class="secret-row"><span>Length</span><code>{{.Secret.Length}} chars</code></div>
+      <div class="secret-row"><span>Mounted at</span><code>{{.Secret.Source}}</code></div>
+      {{else}}
+      <div class="secret-row"><span>Expected at</span><code>{{.Secret.Source}}</code></div>
+      <div class="secret-row"><span>Reason</span><code>{{.Secret.Error}}</code></div>
+      {{end}}
+    </div>
 
     <div class="gcloud">
       <div class="g-dots">

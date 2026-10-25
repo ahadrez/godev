@@ -15,6 +15,8 @@ spec:
       labels:
         app: godev
     spec:
+      # KSA bound to Secret Manager IAM via Workload Identity Federation
+      serviceAccountName: godev
       containers:
         - name: godev
           # Tag is injected by kustomize (see kustomization.yaml images)
@@ -24,6 +26,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: godev-config
+          volumeMounts:
+            # tmpfs mount populated by the Secrets Store CSI driver;
+            # the secret never touches etcd or a Kubernetes Secret
+            - name: gcp-secrets
+              mountPath: /var/secrets
+              readOnly: true
           resources:
             requests:
               cpu: 250m
@@ -43,3 +51,11 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 20
+      volumes:
+        - name: gcp-secrets
+          csi:
+            # GKE built-in add-on driver; on OpenShift: secrets-store.csi.k8s.io
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: godev-secrets
