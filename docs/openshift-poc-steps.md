@@ -13,8 +13,6 @@ can reach `sts.googleapis.com` and `secretmanager.googleapis.com` on 443;
 ```bash
 export PROJECT_ID=udc-cloud-architect-poc
 export PROJECT_NUMBER=148538518928
-export BUCKET=ocp-poc-oidc-${PROJECT_ID}          # must be globally unique
-export ISSUER="https://storage.googleapis.com/${BUCKET}"
 export POOL=ocp-poc-pool
 export WIF_PROVIDER=ocp-poc-cluster
 ```
@@ -25,54 +23,50 @@ export WIF_PROVIDER=ocp-poc-cluster
 
 ```bash
 oc get --raw /openid/v1/jwks > keys.json
+# the issuer URL the cluster stamps into its tokens (keep as-is, no patch needed):
+export ISSUER=$(oc get --raw /.well-known/openid-configuration | jq -r .issuer)
+echo $ISSUER
 ```
+
+No cluster changes required: per the
+[official WIF-with-Kubernetes flow](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes),
+the JWKS is uploaded directly to the workload identity provider
+(`--jwk-json-path`), so the issuer never has to be publicly reachable and the
+cluster keeps its existing `serviceAccountIssuer`.
+
+> **Key rotation:** Google validates against the *uploaded* keys. When the
+> cluster rotates its SA signing keys, re-run Part 1 and
+> `gcloud iam workload-identity-pools providers update-oidc $WIF_PROVIDER
+> --jwk-json-path keys.json ...` — worth a reminder or a small CronJob.
 
 ## Part 2 — ON GCP: trust the cluster
 
 ```bash
-# 2.1 Public bucket hosting the cluster's OIDC discovery docs
-gsutil mb -p $PROJECT_ID gs://${BUCKET}
-cat > openid-configuration <<EOF
-{
-  "issuer": "${ISSUER}",
-  "jwks_uri": "${ISSUER}/keys.json",
-  "response_types_supported": ["id_token"],
-  "subject_types_supported": ["public"],
-  "id_token_signing_alg_values_supported": ["RS256"]
-}
-EOF
-gsutil cp openid-configuration gs://${BUCKET}/.well-known/openid-configuration
-gsutil cp keys.json gs://${BUCKET}/keys.json
-gsutil iam ch allUsers:objectViewer gs://${BUCKET}
-
-# 2.2 Workload identity pool + provider for this cluster
+# 2.1 Workload identity pool + provider for this cluster (JWKS uploaded, no bucket)
 gcloud iam workload-identity-pools create $POOL \
   --project $PROJECT_ID --location global
 gcloud iam workload-identity-pools providers create-oidc $WIF_PROVIDER \
   --project $PROJECT_ID --location global \
   --workload-identity-pool $POOL \
   --issuer-uri "${ISSUER}" \
+  --jwk-json-path keys.json \
   --allowed-audiences "https://secretmanager.ocp-poc" \
   --attribute-mapping "google.subject=assertion.sub"
 
-# 2.3 Grant the provider's future identity access to the ONE secret
+# 2.2 Grant the provider's future identity access to the ONE secret
 gcloud secrets add-iam-policy-binding godev-demo --project $PROJECT_ID \
   --role roles/secretmanager.secretAccessor \
   --member "principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:secrets-store:csi-provider-gcp"
 ```
 
+Multi-cluster note: default on-prem issuers are often the identical string
+(`https://kubernetes.default.svc`), and issuer URIs must be distinguishable
+per provider — for a second cluster, give it a distinct issuer or pool. For a
+single-cluster POC this doesn't matter.
+
 ## Part 3 — ON OPENSHIFT: everything else
 
-### 3.1 Point the cluster at the new issuer  ⚠️ disruptive — disposable cluster only
-
-```bash
-oc patch authentication cluster --type=merge \
-  -p "{\"spec\":{\"serviceAccountIssuer\":\"${ISSUER}\"}}"
-# wait until PROGRESSING=False again (several minutes):
-oc get co kube-apiserver -w
-```
-
-### 3.2 Install the Secrets Store CSI Driver operator
+### 3.1 Install the Secrets Store CSI Driver operator
 
 Easiest: **web console → OperatorHub → "Secrets Store CSI driver" → Install**
 (all defaults). Then enable the driver:
@@ -89,7 +83,7 @@ EOF
 oc get pods -n openshift-cluster-csi-drivers   # driver DaemonSet pods Running
 ```
 
-### 3.3 Deploy the GCP provider (keyless, via the WIF config)
+### 3.2 Deploy the GCP provider (keyless, via the WIF config)
 
 ```bash
 oc new-project secrets-store
@@ -158,7 +152,7 @@ oc adm policy add-scc-to-user privileged -z csi-provider-gcp -n secrets-store
 oc -n secrets-store get pods    # Running on every node
 ```
 
-### 3.4 Deploy the test app (godev manifests, two strings changed)
+### 3.3 Deploy the test app (godev manifests, two strings changed)
 
 ```bash
 oc new-project godev
@@ -208,7 +202,7 @@ EOF
 make the repo public (`gcloud artifacts repositories add-iam-policy-binding
 godev --location us-central1 --member allUsers --role
 roles/artifactregistry.reader`) or create a pull secret; or swap in any public
-image and just `cat` the file (3.5).
+image and just `cat` the file to verify.
 
 ## Part 4 — Verify
 
@@ -221,16 +215,15 @@ printf '%s' 'ocp-rotated' | gcloud secrets versions add godev-demo --data-file=-
 ```
 
 **If the pod is stuck `ContainerCreating`:** `oc -n godev describe pod` —
-`PermissionDenied` → the IAM principal in 2.3 doesn't match the token `sub`;
-`connection refused`/socket errors → provider DaemonSet or SCC (3.3);
+`PermissionDenied` → the IAM principal in 2.2 doesn't match the token `sub`;
+`connection refused`/socket errors → provider DaemonSet or SCC (3.2);
 `invalid_grant`/issuer errors → bucket contents or the audience mismatch
-(2.2 vs 3.3).
+(2.1 vs 3.2).
 
 ## Cleanup (GCP side)
 
 ```bash
 gcloud iam workload-identity-pools delete $POOL --location global --project $PROJECT_ID
-gsutil rm -r gs://${BUCKET}
 gcloud secrets remove-iam-policy-binding godev-demo --project $PROJECT_ID \
-  --role roles/secretmanager.secretAccessor --member "principal://...(same as 2.3)"
+  --role roles/secretmanager.secretAccessor --member "principal://...(same as 2.2)"
 ```

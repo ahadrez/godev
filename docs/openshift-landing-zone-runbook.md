@@ -28,14 +28,14 @@ flowchart LR
     end
 
     subgraph gcp["GCP landing zone"]
-        BKT["GCS bucket<br/>OIDC discovery docs"]
+        BKT["Cluster JWKS<br/>(uploaded to the provider;<br/>GCS bucket only as fallback)"]
         WIF["Workload Identity Pool<br/>+ OIDC provider (per cluster)"]
         STS["Security Token Service"]
         SM["Secret Manager<br/>(secrets project per env)"]
         LOG["Cloud Audit Logs<br/>(data access)"]
     end
 
-    OIDC -. "issuer URL points at" .-> BKT
+    OIDC -. "public signing keys exported to" .-> BKT
     WIF -- "validates tokens against" --> BKT
     PROV -- "projected SA token" --> STS
     STS -- "trusts" --> WIF
@@ -47,7 +47,8 @@ flowchart LR
 
 **Auth flow:** the provider DaemonSet presents its projected Kubernetes SA
 token to GCP STS; STS validates it against the workload identity pool provider
-(which trusts the cluster's OIDC issuer via the discovery docs in the bucket);
+(which validates the signature against the cluster's uploaded JWKS — or fetches it
+from the discovery bucket in the Option B fallback);
 the returned federated token calls Secret Manager. Keyless end to end.
 
 ### ⚠️ The one architectural difference vs the GKE POC
@@ -68,53 +69,44 @@ at implementation time.)
 | **Projects** | A `secrets-<env>` project per environment (dev/test/prod) holding Secret Manager secrets; a shared `identity` project holding the workload identity pools. Keeps IAM administration separable from app projects. |
 | **APIs** | `secretmanager.googleapis.com`, `sts.googleapis.com`, `iamcredentials.googleapis.com` (only if impersonating GSAs), `iam.googleapis.com`. |
 | **Network egress** | Cluster nodes must reach `sts.googleapis.com` and `secretmanager.googleapis.com` (TCP 443). Over Interconnect/VPN use **Private Google Access**: DNS-map `*.googleapis.com` → `private.googleapis.com` (199.36.153.8/30), or `restricted.googleapis.com` if VPC Service Controls are in scope. A corporate HTTPS proxy also works (the provider honors `HTTPS_PROXY`). |
-| **The issuer bucket** | Must be readable by Google STS over the public internet (public read on two small JSON files — they contain only public keys). The *cluster* never reads it. |
+| **The issuer bucket** | Only needed for the Option B fallback in Phase 1 (public read on two small JSON files containing only public keys; the *cluster* never reads it). Option A uploads the JWKS directly and needs no bucket. |
 | **Org policies** | Keep `iam.disableServiceAccountKeyCreation` enforced (this design needs no keys). If `iam.workloadIdentityPoolProviders` (allowed external issuers) is enforced, allowlist the issuer URLs created in Phase 1. |
 | **Audit** | Enable Data Access logs for Secret Manager in each `secrets-<env>` project — every secret read becomes an audit entry attributing the cluster identity. |
 | **Naming** | Secrets: `<app>-<name>` (e.g. `godev-db-password`). Pools: `ocp-<site>-pool`. Providers: one per cluster, `ocp-<cluster>`. |
 
 ## 3. Phase 1 — Give each cluster a GCP-verifiable identity
 
-> **Maintenance-window change.** Updating `serviceAccountIssuer` invalidates
-> in-flight bound SA tokens; the kube-apiserver rolls out and workloads using
-> bound tokens need a restart. Same procedure class as OpenShift STS on AWS.
-> If the cluster's existing issuer URL is already reachable by Google (rare
-> on-prem), skip the re-issuer steps and just host nothing — go to Phase 2.
+Two options, per the
+[official WIF-with-Kubernetes guide](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes):
+
+**Option A — upload the JWKS to the provider (recommended, zero cluster
+changes).** Export the cluster's public signing keys and hand them to the
+workload identity provider in Phase 2 via `--jwk-json-path`. The issuer is
+never fetched by Google, so it needs no public reachability and the cluster
+keeps its existing `serviceAccountIssuer`:
 
 ```bash
-# 1. Current issuer (default on-prem: https://kubernetes.default.svc — not verifiable by GCP)
-oc get authentication cluster -o jsonpath='{.spec.serviceAccountIssuer}'
-
-# 2. Export the cluster's public signing keys
 oc get --raw /openid/v1/jwks > jwks.json
-
-# 3. Host discovery docs in a public GCS bucket (one bucket per cluster)
-BUCKET=ocp-cluster1-oidc
-ISSUER="https://storage.googleapis.com/${BUCKET}"
-gsutil mb -p <identity-project> gs://${BUCKET}
-cat > openid-configuration <<EOF
-{
-  "issuer": "${ISSUER}",
-  "jwks_uri": "${ISSUER}/keys.json",
-  "response_types_supported": ["id_token"],
-  "subject_types_supported": ["public"],
-  "id_token_signing_alg_values_supported": ["RS256"]
-}
-EOF
-gsutil cp openid-configuration gs://${BUCKET}/.well-known/openid-configuration
-gsutil cp jwks.json gs://${BUCKET}/keys.json
-gsutil iam ch allUsers:objectViewer gs://${BUCKET}
-
-# 4. Point the cluster at the new issuer (THE maintenance-window step)
-oc patch authentication cluster --type=merge \
-  -p "{\"spec\":{\"serviceAccountIssuer\":\"${ISSUER}\"}}"
-# wait for kube-apiserver rollout:
-oc get co kube-apiserver -w
+ISSUER=$(oc get --raw /.well-known/openid-configuration | jq -r .issuer)
 ```
 
-**Key rotation note:** when the cluster rotates its SA signing keys, re-upload
-`keys.json`. Automate with a CronJob that diffs `/openid/v1/jwks` against the
-bucket.
+Trade-off: Google validates against the *uploaded* keys, so when the cluster
+rotates its SA signing keys you must re-run the export and
+`gcloud iam workload-identity-pools providers update-oidc ... --jwk-json-path
+jwks.json`. Automate with a CronJob that diffs `/openid/v1/jwks` against the
+provider. Also note issuer URIs must be distinguishable per provider — if all
+clusters use the default `https://kubernetes.default.svc`, give each cluster
+its own pool (this runbook already does one provider per cluster; make it one
+pool per cluster if issuers collide).
+
+**Option B — public discovery bucket + issuer change (fallback).** Host
+`.well-known/openid-configuration` + the JWKS in a public GCS bucket and patch
+`spec.serviceAccountIssuer` to the bucket URL. Google then fetches keys
+dynamically (no manual re-upload on rotation). **Maintenance-window change:**
+updating `serviceAccountIssuer` invalidates in-flight bound SA tokens, rolls
+the kube-apiserver, and workloads using bound tokens need a restart — same
+procedure class as OpenShift STS on AWS. Prefer Option A unless the manual
+key-rotation step is unacceptable operationally.
 
 ## 4. Phase 2 — Workload Identity Pool + provider (per cluster)
 
@@ -132,10 +124,14 @@ gcloud iam workload-identity-pools providers create-oidc $PROVIDER \
   --project $ID_PROJECT --location global \
   --workload-identity-pool $POOL \
   --issuer-uri "${ISSUER}" \
+  --jwk-json-path jwks.json \
   --allowed-audiences "https://secretmanager.ocp" \
   --attribute-mapping "google.subject=assertion.sub" \
   --attribute-condition "assertion.sub.startsWith('system:serviceaccount:secrets-store:')"
 ```
+
+(Drop `--jwk-json-path` if you chose Option B — Google discovers the keys
+from the issuer bucket instead.)
 
 Decisions baked in above:
 
@@ -309,14 +305,16 @@ is the reference implementation (file read + masked status page).
 
 ## 9. Rollout plan
 
-1. **Dev cluster first** (Phases 1–5), including the issuer-change maintenance
-   window rehearsal — this is the step with real blast radius.
+1. **Dev cluster first** (Phases 1–5). With Phase 1 Option A there is no
+   disruptive step; if you chose Option B, rehearse the issuer-change
+   maintenance window here — it is the step with real blast radius.
 2. Onboard one pilot app (godev-equivalent), run the validation checklist and
    the revocation drill.
 3. Write the Kyverno/Gatekeeper policy, test in audit mode, then enforce.
 4. Template Phases 2–3 (Terraform in the landing-zone repo: pool, provider,
-   bucket, per-secret IAM; Helm/kustomize for the cluster components).
-5. Repeat per cluster: prod clusters each get their own provider + bucket.
+   JWKS upload, per-secret IAM; Helm/kustomize for the cluster components).
+5. Repeat per cluster: each prod cluster gets its own provider (own pool if
+   the default issuer URIs collide).
 6. Migrate apps incrementally: for each hardcoded/unmanaged secret → create in
    Secret Manager → grant to cluster → SecretProviderClass + volume → delete
    the old Kubernetes Secret → verify etcd clean.
