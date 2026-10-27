@@ -18,6 +18,10 @@ WIF_PROVIDER="${WIF_PROVIDER:-ocp-lab1}"
 AUDIENCE="${AUDIENCE:-https://ocp-csi-poc.example.invalid}"
 SECRET_NAME="${SECRET_NAME:-csi-poc-password}"
 SECRET_VALUE="${SECRET_VALUE:-POC-DEMO-VALUE-NOT-PRODUCTION}"
+# Region for the secret. The LZ org policy (constraints/gcp.resourceLocations)
+# forbids 'global', so automatic replication is not allowed — the secret must
+# be pinned to an allowed region, e.g. SECRET_LOCATION=me-central2
+SECRET_LOCATION="${SECRET_LOCATION:-}"
 PROVIDER_KSA="secrets-store-csi-driver-provider-gcp"   # must match manifests/
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -51,13 +55,26 @@ log "Enabling required APIs"
 gcloud services enable iam.googleapis.com sts.googleapis.com secretmanager.googleapis.com \
   --project="$PROJECT_ID"
 
-# ---------- 3. Test secret ----------
+# ---------- 3. Test secret (region-pinned: org policy forbids 'global') ----------
 if gcloud secrets describe "$SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
   log "Secret '${SECRET_NAME}' exists — leaving it as is"
 else
-  log "Creating secret '${SECRET_NAME}'"
+  if [ -z "$SECRET_LOCATION" ]; then
+    log "SECRET_LOCATION is not set — your org policy requires a region-pinned secret."
+    echo "Allowed locations for this project (from the effective org policy):"
+    gcloud org-policies describe gcp.resourceLocations --project="$PROJECT_ID" --effective \
+      --format='value(spec.rules.values.allowedValues)' 2>/dev/null \
+      || echo "  (could not read the policy — ask the LZ team which region to use)"
+    echo ""
+    echo "Re-run with, e.g.:  SECRET_LOCATION=me-central2 ./1-gcp-setup.sh"
+    exit 1
+  fi
+  log "Creating secret '${SECRET_NAME}' pinned to ${SECRET_LOCATION}"
   printf '%s' "$SECRET_VALUE" | gcloud secrets create "$SECRET_NAME" \
-    --project="$PROJECT_ID" --replication-policy=automatic --data-file=-
+    --project="$PROJECT_ID" \
+    --replication-policy=user-managed \
+    --locations="$SECRET_LOCATION" \
+    --data-file=-
 fi
 
 # ---------- 4. Workload identity pool + provider (trusts the cluster) ----------
