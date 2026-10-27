@@ -204,7 +204,8 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
 # -----------------------------------------------------------------------------
-# PART C — TEST WORKLOAD
+# PART C — APPLICATION (goapp-sm: reads the mounted secret, shows a masked
+# status card on its web page — never the value itself)
 # -----------------------------------------------------------------------------
 ---
 apiVersion: secrets-store.csi.x-k8s.io/v1
@@ -219,29 +220,88 @@ spec:
       - resourceName: "projects/udc-d-30049622-stella-1/secrets/csi-poc-password/versions/latest"
         path: "password"
 ---
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: csi-demo
+  name: goapp-sm
   namespace: ucod-hadrezak-sandbox
   labels:
-    app: sm-poc
+    app: goapp-sm
 spec:
-  containers:
-    - name: demo
-      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-      command: ["sleep", "infinity"]
-      volumeMounts:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: goapp-sm
+  template:
+    metadata:
+      labels:
+        app: goapp-sm
+    spec:
+      containers:
+        - name: goapp-sm
+          image: quay.io/upstream/goapp-sm
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: openshift-poc
+            # the app reads this file and renders Loaded/Not mounted + masked value
+            - name: SECRET_FILE
+              value: /mnt/secrets/password
+          volumeMounts:
+            - name: secrets
+              mountPath: /mnt/secrets
+              readOnly: true
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          readinessProbe:
+            httpGet: { path: /, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+      volumes:
         - name: secrets
-          mountPath: /mnt/secrets
-          readOnly: true
-  volumes:
-    - name: secrets
-      csi:
-        driver: secrets-store.csi.k8s.io
-        readOnly: true
-        volumeAttributes:
-          secretProviderClass: csi-poc
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: csi-poc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: goapp-sm
+  namespace: ucod-hadrezak-sandbox
+  labels:
+    app: goapp-sm
+spec:
+  selector:
+    app: goapp-sm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: goapp-sm
+  namespace: ucod-hadrezak-sandbox
+  labels:
+    app: goapp-sm
+spec:
+  to:
+    kind: Service
+    name: goapp-sm
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
 # =============================================================================
 # GCP-SIDE COMMANDS (run once in the LZ project, logged in with LZ credentials,
 # with oc pointed at the LZ OpenShift cluster):
@@ -274,9 +334,10 @@ spec:
 #     --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/ocp-csi-poc/subject/system:serviceaccount:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp"
 #
 # VERIFY (never print the secret):
-#   oc -n ucod-hadrezak-sandbox get pods
-#   oc -n ucod-hadrezak-sandbox exec csi-demo -- ls -l /mnt/secrets
-#   oc -n ucod-hadrezak-sandbox exec csi-demo -- test -s /mnt/secrets/password && echo 'CSI mount OK'
+#   oc -n ucod-hadrezak-sandbox get pods                        # provider per node + goapp-sm 1/1
+#   echo "https://$(oc -n ucod-hadrezak-sandbox get route goapp-sm -o jsonpath='{.spec.host}')"
+#     -> open it: the page shows "Loaded" + masked value + length
+#   oc -n ucod-hadrezak-sandbox exec deploy/goapp-sm -- ls -l /mnt/secrets   # works only if image has a shell
 #   oc -n ucod-hadrezak-sandbox get secret csi-poc-password     # expect NotFound (not in etcd)
 # CLEANUP:  oc delete -f openshift-poc-all-in-one.yaml  (keeps the operator's CRD)
 # =============================================================================
