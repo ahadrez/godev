@@ -1,0 +1,44 @@
+# CLUSTER-SCOPED — needs cluster-admin (platform team if you lack rights).
+# RBAC for the Secret Manager CSI provider + its SCC grant.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: secrets-store-csi-driver-provider-gcp-role
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: secrets-store-csi-driver-provider-gcp-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: secrets-store-csi-driver-provider-gcp-role
+subjects:
+  - kind: ServiceAccount
+    name: secrets-store-csi-driver-provider-gcp
+    namespace: ucod-hadrezak-sandbox
+---
+# SCC grant — equivalent of:
+#   oc adm policy add-scc-to-user hostmount-anyuid -z secrets-store-csi-driver-provider-gcp -n ucod-hadrezak-sandbox
+# (hostPath volume + root init container; narrower than privileged)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: provider-gcp-scc-hostmount-anyuid
+  namespace: ucod-hadrezak-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:hostmount-anyuid
+subjects:
+  - kind: ServiceAccount
+    name: secrets-store-csi-driver-provider-gcp
+    namespace: ucod-hadrezak-sandbox
