@@ -93,13 +93,25 @@ if gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
     --jwk-json-path="${SCRIPT_DIR}/cluster-jwks.json"
 else
   log "Creating OIDC provider '${WIF_PROVIDER}' (JWKS uploaded — no public issuer needed)"
-  gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
+  if ! gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
     --project="$PROJECT_ID" --location=global --workload-identity-pool="$POOL" \
     --issuer-uri="$ISSUER" \
     --allowed-audiences="$AUDIENCE" \
     --attribute-mapping='google.subject=assertion.sub' \
     --attribute-condition="assertion.sub == '${SUBJECT}'" \
-    --jwk-json-path="${SCRIPT_DIR}/cluster-jwks.json"
+    --jwk-json-path="${SCRIPT_DIR}/cluster-jwks.json"; then
+    echo ""
+    echo "If this failed with constraints/iam.workloadIdentityPoolProviders:"
+    echo "the org allowlists which issuer URIs WIF may trust, and '${ISSUER}'"
+    echo "is not on it. The issuer CANNOT be changed here — it must match the"
+    echo "'iss' claim in the cluster's tokens. Fix one of:"
+    echo "  a) Ask the org-policy admin to allow '${ISSUER}' for THIS project only."
+    echo "  b) See what IS allowed and have the platform team set the cluster's"
+    echo "     serviceAccountIssuer to a compliant URL (disruptive):"
+    echo "       gcloud org-policies describe iam.workloadIdentityPoolProviders \\"
+    echo "         --project=${PROJECT_ID} --effective"
+    exit 1
+  fi
 fi
 
 # ---------- 5. IAM: this ONE secret only, keyless principal ----------
