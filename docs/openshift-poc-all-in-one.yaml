@@ -19,51 +19,18 @@
 #      ...subject/system:serviceaccount:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp
 #   2. Nodes reach sts.googleapis.com + secretmanager.googleapis.com :443
 #      (via the LZ's approved proxy/private Google API routing)
-#   3. CLUSTER-ADMIN pieces: the operator install (OperatorGroup+Subscription+
-#      ClusterCSIDriver), the ClusterRole/Binding, the SCC RoleBinding, and a
-#      hostPath DaemonSet are NOT possible with sandbox-project rights alone.
-#      If you only own the namespace, hand this file to the platform team —
-#      it is organized so the cluster-scoped part is clearly separated.
-#
-# APPLY TWICE: first apply installs the operator; the SecretProviderClass at
-# the bottom fails until its CRD registers (~1–3 min). Wait for
-#   oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io
-# then run the same apply again (idempotent).
+#   3. The Red Hat Secrets Store CSI Driver operator is ALREADY DEPLOYED on
+#      the cluster (this file does not install it). Sanity-check first:
+#        oc get csidriver secrets-store.csi.k8s.io
+#        oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io
+#      Both must exist before applying.
+#   4. CLUSTER-SCOPED pieces (Part A: ClusterRole/Binding + SCC RoleBinding)
+#      are NOT possible with sandbox-project rights alone. If you only own the
+#      namespace, hand Part A to the platform team — it is clearly separated.
 # =============================================================================
 # -----------------------------------------------------------------------------
 # PART A — CLUSTER-SCOPED (cluster-admin / platform team)
-#
-# Red Hat Secrets Store CSI Driver Operator via OLM. SKIP/DELETE the
-# OperatorGroup+Subscription if the operator is already installed (a second
-# OperatorGroup in the namespace breaks OLM resolution).
 # -----------------------------------------------------------------------------
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: secrets-store-csi-driver-operator-og
-  namespace: openshift-cluster-csi-drivers
-spec: {}   # empty = all namespaces (cluster-wide operator)
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: secrets-store-csi-driver-operator
-  namespace: openshift-cluster-csi-drivers
-spec:
-  name: secrets-store-csi-driver-operator
-  channel: stable
-  source: redhat-operators
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
----
-# Tells the operator to actually deploy the driver DaemonSet
-apiVersion: operator.openshift.io/v1
-kind: ClusterCSIDriver
-metadata:
-  name: secrets-store.csi.k8s.io
-spec:
-  managementState: Managed
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -237,8 +204,7 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
 # -----------------------------------------------------------------------------
-# PART C — TEST WORKLOAD (fails on first apply until the operator registers
-# the SecretProviderClass CRD — rerun the apply)
+# PART C — TEST WORKLOAD
 # -----------------------------------------------------------------------------
 ---
 apiVersion: secrets-store.csi.x-k8s.io/v1
