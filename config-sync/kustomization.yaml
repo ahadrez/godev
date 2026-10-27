@@ -21,4 +21,4 @@ configMapGenerator:
 # Image tag pinned by CI (cloudbuild.yaml update-manifests step)
 images:
   - name: us-central1-docker.pkg.dev/udc-cloud-architect-poc/godev/godev
-    newTag: "5afe55d"
+    newTag: "708f51c"
