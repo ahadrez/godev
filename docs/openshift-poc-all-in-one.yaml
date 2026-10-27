@@ -1,45 +1,41 @@
 # =============================================================================
-# OpenShift + GCP Secret Manager POC — single-file manifest
+# OpenShift + GCP Secret Manager POC — single-file manifest (landing zone)
 #
-# Everything the OPENSHIFT side needs:  oc apply -f openshift-poc-all-in-one.yaml
+# Target environment:
+#   OpenShift project (namespace):  ucod-hadrezak-sandbox   (must already exist)
+#   GCP project:                    udc-d-30049622-stella-1
+#   WIF:                            pool ocp-csi-poc / provider ocp-lab1
+#   Audience:                       https://ocp-csi-poc.example.invalid
+#   Secret:                         csi-poc-password
 #
-# PREREQUISITES (once, before applying):
-#   1. GCP side done (docs/openshift-poc-steps.md §1–2): WIF pool `ocp-csi-poc`,
-#      provider `ocp-lab1` created with --jwk-json-path=cluster-jwks.json from
-#      THIS cluster, secret `csi-poc-password`, IAM binding to the principal
-#      system:serviceaccount:csi-poc-system:secrets-store-csi-driver-provider-gcp
-#   2. Nodes can reach sts.googleapis.com + secretmanager.googleapis.com :443
+# ONE VALUE TO FILL IN before applying — the GCP project NUMBER (not id):
+#   gcloud projects describe udc-d-30049622-stella-1 --format='value(projectNumber)'
+# then replace the single occurrence of REPLACE_PROJECT_NUMBER below.
 #
-# APPLY TWICE: the first apply installs the Red Hat operator; the
-# SecretProviderClass at the bottom fails until the operator registers its CRD
-# (~1–3 min). Wait for `oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io`
-# then run the same apply again — it is idempotent.
+# PREREQUISITES:
+#   1. GCP side done IN THE LZ PROJECT (see "GCP-side commands" at the bottom
+#      of this file): pool + provider created with --jwk-json-path from THIS
+#      OpenShift cluster's JWKS, secret created, IAM bound to the principal
+#      ...subject/system:serviceaccount:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp
+#   2. Nodes reach sts.googleapis.com + secretmanager.googleapis.com :443
+#      (via the LZ's approved proxy/private Google API routing)
+#   3. CLUSTER-ADMIN pieces: the operator install (OperatorGroup+Subscription+
+#      ClusterCSIDriver), the ClusterRole/Binding, the SCC RoleBinding, and a
+#      hostPath DaemonSet are NOT possible with sandbox-project rights alone.
+#      If you only own the namespace, hand this file to the platform team —
+#      it is organized so the cluster-scoped part is clearly separated.
 #
-# Baked-in values (change if your environment differs):
-#   GCP project:  udc-cloud-architect-poc (148538518928)
-#   WIF:          pool ocp-csi-poc / provider ocp-lab1
-#   Audience:     https://ocp-csi-poc.example.invalid
-#   Secret:       csi-poc-password
+# APPLY TWICE: first apply installs the operator; the SecretProviderClass at
+# the bottom fails until its CRD registers (~1–3 min). Wait for
+#   oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io
+# then run the same apply again (idempotent).
 # =============================================================================
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: csi-poc-system
-  labels:
-    app: sm-poc
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: csi-poc
-  labels:
-    app: sm-poc
 # -----------------------------------------------------------------------------
-# Red Hat Secrets Store CSI Driver Operator (OLM install).
-# SKIP/DELETE this OperatorGroup+Subscription block if you already installed
-# the operator from the console — a second OperatorGroup in the namespace
-# breaks OLM resolution.
+# PART A — CLUSTER-SCOPED (cluster-admin / platform team)
+#
+# Red Hat Secrets Store CSI Driver Operator via OLM. SKIP/DELETE the
+# OperatorGroup+Subscription if the operator is already installed (a second
+# OperatorGroup in the namespace breaks OLM resolution).
 # -----------------------------------------------------------------------------
 ---
 apiVersion: operators.coreos.com/v1
@@ -68,17 +64,6 @@ metadata:
   name: secrets-store.csi.k8s.io
 spec:
   managementState: Managed
-# -----------------------------------------------------------------------------
-# Google Secret Manager provider (upstream deploy/provider-gcp-plugin.yaml,
-# adapted: namespace csi-poc-system; socket dir /var/run/secrets-store-csi-providers
-# to match the Red Hat driver; UBI init image; keyless WIF credentials injected)
-# -----------------------------------------------------------------------------
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: secrets-store-csi-driver-provider-gcp
-  namespace: csi-poc-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -103,16 +88,16 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: secrets-store-csi-driver-provider-gcp
-    namespace: csi-poc-system
+    namespace: ucod-hadrezak-sandbox
 ---
 # SCC grant — YAML equivalent of:
-#   oc adm policy add-scc-to-user hostmount-anyuid -z secrets-store-csi-driver-provider-gcp -n csi-poc-system
+#   oc adm policy add-scc-to-user hostmount-anyuid -z secrets-store-csi-driver-provider-gcp -n ucod-hadrezak-sandbox
 # (hostPath volume + root init container; narrower than privileged)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: provider-gcp-scc-hostmount-anyuid
-  namespace: csi-poc-system
+  namespace: ucod-hadrezak-sandbox
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -120,24 +105,37 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: secrets-store-csi-driver-provider-gcp
-    namespace: csi-poc-system
+    namespace: ucod-hadrezak-sandbox
+# -----------------------------------------------------------------------------
+# PART B — NAMESPACE-SCOPED (ucod-hadrezak-sandbox)
+#
+# Google Secret Manager provider (upstream deploy/provider-gcp-plugin.yaml,
+# adapted: sandbox namespace; socket dir /var/run/secrets-store-csi-providers
+# to match the Red Hat driver; UBI init image; keyless WIF credentials)
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secrets-store-csi-driver-provider-gcp
+  namespace: ucod-hadrezak-sandbox
 ---
 # Keyless WIF credential CONFIG (not a key — safe in a ConfigMap).
 # Identical to the output of:
 #   gcloud iam workload-identity-pools create-cred-config \
-#     projects/148538518928/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1 \
+#     projects/REPLACE_PROJECT_NUMBER/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1 \
 #     --credential-source-file=/var/run/wif/token --credential-source-type=text
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: csi-wif
-  namespace: csi-poc-system
+  namespace: ucod-hadrezak-sandbox
 data:
   credentials.json: |
     {
       "universe_domain": "googleapis.com",
       "type": "external_account",
-      "audience": "//iam.googleapis.com/projects/148538518928/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1",
+      "audience": "//iam.googleapis.com/projects/REPLACE_PROJECT_NUMBER/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1",
       "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
       "token_url": "https://sts.googleapis.com/v1/token",
       "credential_source": {
@@ -152,7 +150,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: csi-secrets-store-provider-gcp
-  namespace: csi-poc-system
+  namespace: ucod-hadrezak-sandbox
   labels:
     app: csi-secrets-store-provider-gcp
 spec:
@@ -180,7 +178,8 @@ spec:
               name: providervol
       containers:
         - name: provider
-          # upstream-pinned image (deploy/provider-gcp-plugin.yaml @ 2026-10-27)
+          # upstream-pinned image (deploy/provider-gcp-plugin.yaml @ 2026-10-27);
+          # mirror to the LZ's internal registry if external pulls are blocked
           image: us-docker.pkg.dev/secretmanager-csi/secrets-store-csi-driver-provider-gcp/plugin@sha256:d75de980398bf14f07088ac36dea472b7b4d4cdc11b6335723020cc6ab0c8c28
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -238,27 +237,27 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
 # -----------------------------------------------------------------------------
-# Test workload (fails on first apply until the operator registers the
-# SecretProviderClass CRD — rerun the apply)
+# PART C — TEST WORKLOAD (fails on first apply until the operator registers
+# the SecretProviderClass CRD — rerun the apply)
 # -----------------------------------------------------------------------------
 ---
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
   name: csi-poc
-  namespace: csi-poc
+  namespace: ucod-hadrezak-sandbox
 spec:
   provider: gcp
   parameters:
     secrets: |
-      - resourceName: "projects/udc-cloud-architect-poc/secrets/csi-poc-password/versions/latest"
+      - resourceName: "projects/udc-d-30049622-stella-1/secrets/csi-poc-password/versions/latest"
         path: "password"
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: csi-demo
-  namespace: csi-poc
+  namespace: ucod-hadrezak-sandbox
   labels:
     app: sm-poc
 spec:
@@ -278,11 +277,40 @@ spec:
         volumeAttributes:
           secretProviderClass: csi-poc
 # =============================================================================
+# GCP-SIDE COMMANDS (run once in the LZ project, logged in with LZ credentials,
+# with oc pointed at the LZ OpenShift cluster):
+#
+#   export PROJECT_ID='udc-d-30049622-stella-1'
+#   export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+#   export ISSUER="$(oc get --raw /.well-known/openid-configuration | jq -r '.issuer')"
+#   oc get --raw /openid/v1/jwks > cluster-jwks.json
+#
+#   gcloud services enable iam.googleapis.com sts.googleapis.com secretmanager.googleapis.com --project="$PROJECT_ID"
+#
+#   printf '%s' 'POC-DEMO-VALUE-NOT-PRODUCTION' | \
+#     gcloud secrets create csi-poc-password --project="$PROJECT_ID" \
+#       --replication-policy=automatic --data-file=-
+#
+#   gcloud iam workload-identity-pools create ocp-csi-poc \
+#     --project="$PROJECT_ID" --location=global --display-name='OpenShift CSI PoC'
+#
+#   gcloud iam workload-identity-pools providers create-oidc ocp-lab1 \
+#     --project="$PROJECT_ID" --location=global --workload-identity-pool=ocp-csi-poc \
+#     --issuer-uri="$ISSUER" \
+#     --allowed-audiences='https://ocp-csi-poc.example.invalid' \
+#     --attribute-mapping='google.subject=assertion.sub' \
+#     --attribute-condition="assertion.sub == 'system:serviceaccount:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp'" \
+#     --jwk-json-path=cluster-jwks.json
+#
+#   gcloud secrets add-iam-policy-binding csi-poc-password \
+#     --project="$PROJECT_ID" \
+#     --role='roles/secretmanager.secretAccessor' \
+#     --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/ocp-csi-poc/subject/system:serviceaccount:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp"
+#
 # VERIFY (never print the secret):
-#   oc -n csi-poc-system get pods                      # provider Running per node
-#   oc -n csi-poc get pod csi-demo                     # 1/1 Running
-#   oc -n csi-poc exec csi-demo -- ls -l /mnt/secrets
-#   oc -n csi-poc exec csi-demo -- test -s /mnt/secrets/password && echo 'CSI mount OK'
-#   oc -n csi-poc get secret csi-poc-password          # expect NotFound (not in etcd)
+#   oc -n ucod-hadrezak-sandbox get pods
+#   oc -n ucod-hadrezak-sandbox exec csi-demo -- ls -l /mnt/secrets
+#   oc -n ucod-hadrezak-sandbox exec csi-demo -- test -s /mnt/secrets/password && echo 'CSI mount OK'
+#   oc -n ucod-hadrezak-sandbox get secret csi-poc-password     # expect NotFound (not in etcd)
 # CLEANUP:  oc delete -f openshift-poc-all-in-one.yaml  (keeps the operator's CRD)
 # =============================================================================
