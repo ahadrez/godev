@@ -1,0 +1,288 @@
+# =============================================================================
+# OpenShift + GCP Secret Manager POC — single-file manifest
+#
+# Everything the OPENSHIFT side needs:  oc apply -f openshift-poc-all-in-one.yaml
+#
+# PREREQUISITES (once, before applying):
+#   1. GCP side done (docs/openshift-poc-steps.md §1–2): WIF pool `ocp-csi-poc`,
+#      provider `ocp-lab1` created with --jwk-json-path=cluster-jwks.json from
+#      THIS cluster, secret `csi-poc-password`, IAM binding to the principal
+#      system:serviceaccount:csi-poc-system:secrets-store-csi-driver-provider-gcp
+#   2. Nodes can reach sts.googleapis.com + secretmanager.googleapis.com :443
+#
+# APPLY TWICE: the first apply installs the Red Hat operator; the
+# SecretProviderClass at the bottom fails until the operator registers its CRD
+# (~1–3 min). Wait for `oc get crd secretproviderclasses.secrets-store.csi.x-k8s.io`
+# then run the same apply again — it is idempotent.
+#
+# Baked-in values (change if your environment differs):
+#   GCP project:  udc-cloud-architect-poc (148538518928)
+#   WIF:          pool ocp-csi-poc / provider ocp-lab1
+#   Audience:     https://ocp-csi-poc.example.invalid
+#   Secret:       csi-poc-password
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: csi-poc-system
+  labels:
+    app: sm-poc
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: csi-poc
+  labels:
+    app: sm-poc
+# -----------------------------------------------------------------------------
+# Red Hat Secrets Store CSI Driver Operator (OLM install).
+# SKIP/DELETE this OperatorGroup+Subscription block if you already installed
+# the operator from the console — a second OperatorGroup in the namespace
+# breaks OLM resolution.
+# -----------------------------------------------------------------------------
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: secrets-store-csi-driver-operator-og
+  namespace: openshift-cluster-csi-drivers
+spec: {}   # empty = all namespaces (cluster-wide operator)
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: secrets-store-csi-driver-operator
+  namespace: openshift-cluster-csi-drivers
+spec:
+  name: secrets-store-csi-driver-operator
+  channel: stable
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+---
+# Tells the operator to actually deploy the driver DaemonSet
+apiVersion: operator.openshift.io/v1
+kind: ClusterCSIDriver
+metadata:
+  name: secrets-store.csi.k8s.io
+spec:
+  managementState: Managed
+# -----------------------------------------------------------------------------
+# Google Secret Manager provider (upstream deploy/provider-gcp-plugin.yaml,
+# adapted: namespace csi-poc-system; socket dir /var/run/secrets-store-csi-providers
+# to match the Red Hat driver; UBI init image; keyless WIF credentials injected)
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secrets-store-csi-driver-provider-gcp
+  namespace: csi-poc-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: secrets-store-csi-driver-provider-gcp-role
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: secrets-store-csi-driver-provider-gcp-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: secrets-store-csi-driver-provider-gcp-role
+subjects:
+  - kind: ServiceAccount
+    name: secrets-store-csi-driver-provider-gcp
+    namespace: csi-poc-system
+---
+# SCC grant — YAML equivalent of:
+#   oc adm policy add-scc-to-user hostmount-anyuid -z secrets-store-csi-driver-provider-gcp -n csi-poc-system
+# (hostPath volume + root init container; narrower than privileged)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: provider-gcp-scc-hostmount-anyuid
+  namespace: csi-poc-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:hostmount-anyuid
+subjects:
+  - kind: ServiceAccount
+    name: secrets-store-csi-driver-provider-gcp
+    namespace: csi-poc-system
+---
+# Keyless WIF credential CONFIG (not a key — safe in a ConfigMap).
+# Identical to the output of:
+#   gcloud iam workload-identity-pools create-cred-config \
+#     projects/148538518928/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1 \
+#     --credential-source-file=/var/run/wif/token --credential-source-type=text
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csi-wif
+  namespace: csi-poc-system
+data:
+  credentials.json: |
+    {
+      "universe_domain": "googleapis.com",
+      "type": "external_account",
+      "audience": "//iam.googleapis.com/projects/148538518928/locations/global/workloadIdentityPools/ocp-csi-poc/providers/ocp-lab1",
+      "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+      "token_url": "https://sts.googleapis.com/v1/token",
+      "credential_source": {
+        "file": "/var/run/wif/token",
+        "format": {
+          "type": "text"
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-secrets-store-provider-gcp
+  namespace: csi-poc-system
+  labels:
+    app: csi-secrets-store-provider-gcp
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: csi-secrets-store-provider-gcp
+  template:
+    metadata:
+      labels:
+        app: csi-secrets-store-provider-gcp
+    spec:
+      serviceAccountName: secrets-store-csi-driver-provider-gcp
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      initContainers:
+        # upstream uses busybox; UBI avoids docker.io pulls on OpenShift
+        - name: chown-provider-mount
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["chown", "1000:1000", "/var/run/secrets-store-csi-providers"]
+          volumeMounts:
+            - mountPath: /var/run/secrets-store-csi-providers
+              name: providervol
+      containers:
+        - name: provider
+          # upstream-pinned image (deploy/provider-gcp-plugin.yaml @ 2026-10-27)
+          image: us-docker.pkg.dev/secretmanager-csi/secrets-store-csi-driver-provider-gcp/plugin@sha256:d75de980398bf14f07088ac36dea472b7b4d4cdc11b6335723020cc6ab0c8c28
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # where the provider creates its socket; the RH driver watches this
+            # dir. If mounts fail with "provider not found", check the driver
+            # pods' --provider-volume path and align (upstream GKE manifests
+            # use /etc/kubernetes/secrets-store-csi-providers instead).
+            - name: TARGET_DIR
+              value: /var/run/secrets-store-csi-providers
+            # keyless auth: external_account config + projected, rotating token
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/run/wif/credentials.json
+          volumeMounts:
+            - mountPath: /var/run/secrets-store-csi-providers
+              name: providervol
+              mountPropagation: None
+              readOnly: false
+            - mountPath: /var/run/wif
+              name: wif
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 100Mi }
+            limits: { cpu: 50m, memory: 100Mi }
+          livenessProbe:
+            httpGet: { path: /live, port: 8095 }
+            initialDelaySeconds: 5
+            timeoutSeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: providervol
+          hostPath:
+            path: /var/run/secrets-store-csi-providers
+        - name: wif
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: https://ocp-csi-poc.example.invalid   # = WIF --allowed-audiences
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  name: csi-wif
+                  items:
+                    - key: credentials.json
+                      path: credentials.json
+      nodeSelector:
+        kubernetes.io/os: linux
+# -----------------------------------------------------------------------------
+# Test workload (fails on first apply until the operator registers the
+# SecretProviderClass CRD — rerun the apply)
+# -----------------------------------------------------------------------------
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: csi-poc
+  namespace: csi-poc
+spec:
+  provider: gcp
+  parameters:
+    secrets: |
+      - resourceName: "projects/udc-cloud-architect-poc/secrets/csi-poc-password/versions/latest"
+        path: "password"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: csi-demo
+  namespace: csi-poc
+  labels:
+    app: sm-poc
+spec:
+  containers:
+    - name: demo
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: secrets
+          mountPath: /mnt/secrets
+          readOnly: true
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: csi-poc
+# =============================================================================
+# VERIFY (never print the secret):
+#   oc -n csi-poc-system get pods                      # provider Running per node
+#   oc -n csi-poc get pod csi-demo                     # 1/1 Running
+#   oc -n csi-poc exec csi-demo -- ls -l /mnt/secrets
+#   oc -n csi-poc exec csi-demo -- test -s /mnt/secrets/password && echo 'CSI mount OK'
+#   oc -n csi-poc get secret csi-poc-password          # expect NotFound (not in etcd)
+# CLEANUP:  oc delete -f openshift-poc-all-in-one.yaml  (keeps the operator's CRD)
+# =============================================================================
