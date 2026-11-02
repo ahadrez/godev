@@ -565,6 +565,60 @@
       word-break: break-all;
     }
 
+    /* provenance line: where the value comes from */
+    .secret-source {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed #e8eaed;
+      font-size: .7rem;
+      color: #9aa0a6;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .secret-source .g-dots { transform: scale(.9); }
+
+    .secret-source code {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      word-break: break-all;
+      color: #5f6368;
+    }
+
+    /* hold-to-reveal */
+    .reveal-btn {
+      margin-top: 10px;
+      width: 100%;
+      border: 1px solid #dadce0;
+      background: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font: 500 .75rem 'Google Sans', 'Inter', system-ui, sans-serif;
+      color: #1a73e8;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+
+    .reveal-btn:active {
+      background: rgba(26, 115, 232, .08);
+      border-color: #1a73e8;
+    }
+
+    /* flash when a new secret version arrives from Secret Manager */
+    @keyframes rotatedFlash {
+      0%   { box-shadow: 0 0 0 0 rgba(52, 168, 83, .45); background: rgba(52, 168, 83, .08); }
+      100% { box-shadow: 0 0 0 14px rgba(52, 168, 83, 0); background: #fafbfc; }
+    }
+
+    .secret-card.rotated { animation: rotatedFlash 1.6s ease-out; }
+
+    .rotation-note {
+      color: #34a853;
+      font-weight: 500;
+    }
+
     .gcloud {
       display: inline-flex;
       align-items: center;
@@ -662,24 +716,91 @@
     <div class="env-label env-{{.Env}}">{{.Env}}</div>
     <p class="subtitle">Powered by Google Cloud</p>
 
-    <div class="secret-card">
+    <div class="secret-card" id="sm-card">
       <div class="secret-title">
         Google Cloud Secret Manager
         {{if .Secret.Loaded}}
-        <span class="secret-pill ok">Loaded</span>
+        <span class="secret-pill ok" id="sm-pill">Loaded</span>
         {{else}}
-        <span class="secret-pill missing">Not mounted</span>
+        <span class="secret-pill missing" id="sm-pill">Not mounted</span>
         {{end}}
       </div>
-      {{if .Secret.Loaded}}
-      <div class="secret-row"><span>Value (masked)</span><code>{{.Secret.Masked}}</code></div>
-      <div class="secret-row"><span>Length</span><code>{{.Secret.Length}} chars</code></div>
-      <div class="secret-row"><span>Mounted at</span><code>{{.Secret.Source}}</code></div>
-      {{else}}
-      <div class="secret-row"><span>Expected at</span><code>{{.Secret.Source}}</code></div>
+      <div class="secret-row"><span>Value</span><code id="sm-value">{{if .Secret.Loaded}}{{.Secret.Masked}}{{else}}—{{end}}</code></div>
+      <div class="secret-row"><span>Length</span><code id="sm-length">{{if .Secret.Loaded}}{{.Secret.Length}} chars{{else}}—{{end}}</code></div>
+      <div class="secret-row"><span>Version fingerprint</span><code id="sm-fp">{{if .Secret.Loaded}}{{.Secret.Fingerprint}}{{else}}—{{end}}</code></div>
+      <div class="secret-row"><span>Rotation</span><code id="sm-rotation">watching for changes…</code></div>
+      <div class="secret-row"><span>Mounted at</span><code id="sm-mount">{{.Secret.Source}}</code></div>
+      {{if not .Secret.Loaded}}
       <div class="secret-row"><span>Reason</span><code>{{.Secret.Error}}</code></div>
       {{end}}
+      {{if .AllowReveal}}
+      <button class="reveal-btn" id="sm-reveal" type="button">&#128065;&#65039; Hold to reveal</button>
+      {{end}}
+      <div class="secret-source">
+        <div class="g-dots">
+          <div class="g-dot"></div><div class="g-dot"></div><div class="g-dot"></div><div class="g-dot"></div>
+        </div>
+        <span>Live from GCP Secret Manager{{if .Secret.Resource}} · <code>{{.Secret.Resource}}</code>{{end}}</span>
+      </div>
     </div>
+
+    <script>
+      (function () {
+        const $ = (id) => document.getElementById(id);
+        let latest = null, lastFp = null, holding = false;
+        let rotations = 0, lastChange = null;
+
+        function render() {
+          if (!latest) return;
+          const pill = $('sm-pill');
+          pill.textContent = latest.loaded ? 'Loaded' : 'Not mounted';
+          pill.className = 'secret-pill ' + (latest.loaded ? 'ok' : 'missing');
+          $('sm-value').textContent = latest.loaded
+            ? (holding && latest.value ? latest.value : latest.masked) : '—';
+          $('sm-length').textContent = latest.loaded ? latest.length + ' chars' : '—';
+          $('sm-fp').textContent = latest.loaded ? latest.fingerprint : '—';
+          $('sm-mount').textContent = latest.source;
+        }
+
+        function tickRotation() {
+          const el = $('sm-rotation');
+          if (!lastChange) { el.textContent = rotations ? rotations + ' observed' : 'watching for changes…'; return; }
+          const secs = Math.round((Date.now() - lastChange) / 1000);
+          el.innerHTML = '<span class="rotation-note">' + rotations +
+            ' observed — last ' + (secs < 60 ? secs + 's' : Math.round(secs / 60) + 'm') + ' ago</span>';
+        }
+
+        async function poll() {
+          try {
+            const r = await fetch('/api/secret', { cache: 'no-store' });
+            latest = await r.json();
+            if (latest.loaded && lastFp && latest.fingerprint !== lastFp) {
+              rotations++; lastChange = Date.now();
+              const card = $('sm-card');
+              card.classList.remove('rotated'); void card.offsetWidth;
+              card.classList.add('rotated');
+            }
+            if (latest.loaded) lastFp = latest.fingerprint;
+            render(); tickRotation();
+          } catch (e) { /* keep last known state */ }
+        }
+
+        setInterval(poll, 5000);
+        setInterval(tickRotation, 1000);
+        poll();
+
+        const btn = $('sm-reveal');
+        if (btn) {
+          const down = (e) => { e.preventDefault(); holding = true; btn.textContent = '🔓 Release to mask'; render(); };
+          const up = () => { holding = false; btn.innerHTML = '👁️ Hold to reveal'; render(); };
+          btn.addEventListener('mousedown', down);
+          btn.addEventListener('mouseup', up);
+          btn.addEventListener('mouseleave', up);
+          btn.addEventListener('touchstart', down, { passive: false });
+          btn.addEventListener('touchend', up);
+        }
+      })();
+    </script>
 
     <div class="gcloud">
       <div class="g-dots">
