@@ -25,42 +25,80 @@ integration work.
 
 ## 1. Target architecture
 
+### 1a. High-level view (the elevator version)
+
+An application on on-prem OpenShift reads its secret from GCP Secret Manager
+as a plain file. The cluster proves its identity to Google cryptographically —
+**no passwords, no key files, nothing stored in the cluster**.
+
 ```mermaid
 flowchart LR
-    subgraph onprem["On-prem data center"]
-        subgraph ocp["OpenShift cluster"]
-            OIDC["Cluster OIDC issuer<br/>(bound SA tokens)"]
-            PROV["CSI driver + GCP provider<br/>DaemonSets (cluster service)"]
-            subgraph app["App namespace"]
-                SPC["SecretProviderClass"]
-                POD["App pod — tmpfs file mount"]
-            end
+    APP["📦 Application<br/>on OpenShift (on-prem)"]
+    FILE["📄 Secret appears as a file<br/>in the pod (memory only)"]
+    BRIDGE["🔌 Secrets Store CSI<br/>(cluster add-on)"]
+    TRUST["🤝 Google verifies the<br/>cluster's signature<br/>(keyless — no credentials)"]
+    SM["🔐 GCP Secret Manager<br/>single source of truth,<br/>versioned + audited"]
+
+    APP --- FILE
+    FILE --- BRIDGE
+    BRIDGE --- TRUST
+    TRUST --- SM
+```
+
+What this buys us: secrets leave git, etcd, and config files; every access is
+IAM-controlled and audit-logged; rotation is a version bump in one place; and
+there is no credential anywhere that can leak — the same model our GKE
+clusters already use, extended on-prem.
+
+### 1b. Technical view (as validated 2026-11-02)
+
+```mermaid
+flowchart TB
+    subgraph onprem["On-prem OpenShift cluster (issuer: https://kubernetes.default.svc)"]
+        direction TB
+        subgraph sysns["openshift-cluster-csi-drivers (privileged)"]
+            DRV["RH Secrets Store CSI driver<br/>(operator-managed, node DaemonSet,<br/>rotation poll 2m)"]
+            PROV["GCP provider DaemonSet<br/>privileged containers (SELinux),<br/>image mirrored to internal registry"]
+            TOK["Projected SA token<br/>aud = WIF audience, 1h TTL"]
+            CFG["ConfigMap: external_account<br/>credential config (no secrets)"]
+        end
+        subgraph appns["App namespace (PSA: enforce=privileged)"]
+            SPC["SecretProviderClass<br/>auth: provider-adc ⚠️<br/>secret resource + path"]
+            POD["App pod<br/>CSI inline volume → tmpfs file"]
         end
     end
 
-    subgraph gcp["GCP landing zone"]
-        BKT["Cluster JWKS<br/>(uploaded to the provider;<br/>GCS bucket only as fallback)"]
-        WIF["Workload Identity Pool<br/>+ OIDC provider (per cluster)"]
-        STS["Security Token Service"]
-        SM["Secret Manager<br/>(secrets project per env)"]
-        LOG["Cloud Audit Logs<br/>(data access)"]
+    subgraph gcp["GCP project (LZ)"]
+        ORG["Org-policy override:<br/>iam.workloadIdentityPoolProviders<br/>allows this cluster's issuer"]
+        WIF["WIF pool + OIDC provider<br/>uploaded JWKS, audience check,<br/>subject condition = provider KSA only"]
+        STS["STS token exchange"]
+        IAM["IAM: secretAccessor<br/>on ONE secret, to the<br/>federated principal"]
+        SM["Secret Manager<br/>region-pinned secret<br/>(gcp.resourceLocations)"]
+        LOG["Cloud Audit Logs"]
     end
 
-    OIDC -. "public signing keys exported to" .-> BKT
-    WIF -- "validates tokens against" --> BKT
-    PROV -- "projected SA token" --> STS
-    STS -- "trusts" --> WIF
-    PROV -- "federated access token" --> SM
+    POD -- "1 pod start: volume mount request" --> DRV
+    DRV -- "2 gRPC over node socket<br/>/var/run/secrets-store-csi-providers" --> PROV
+    SPC -. "3 which secret, which path,<br/>which auth mode" .-> PROV
+    TOK --> PROV
+    CFG --> PROV
+    PROV -- "4 K8s SA token (signed by cluster)" --> STS
+    STS -- "5 signature vs uploaded JWKS,<br/>audience + subject conditions" --> WIF
+    ORG -. "permits provider registration" .-> WIF
+    STS -- "6 federated access token" --> PROV
+    PROV -- "7 AccessSecretVersion" --> IAM
+    IAM --> SM
+    SM -- "8 secret bytes → tmpfs file" --> POD
     SM --> LOG
-    SPC --> PROV
-    PROV --> POD
 ```
 
-**Auth flow:** the provider DaemonSet presents its projected Kubernetes SA
-token to GCP STS; STS validates it against the workload identity pool provider
-(which validates the signature against the cluster's uploaded JWKS — or fetches it
-from the discovery bucket in the Option B fallback);
-the returned federated token calls Secret Manager. Keyless end to end.
+**Auth flow in words:** at pod start the RH driver asks the GCP provider for
+the secret (1–3); the provider presents its own projected, auto-rotating
+ServiceAccount token to Google STS (4); STS validates the signature against
+the cluster's uploaded JWKS and enforces the audience and subject conditions
+(5), returning a 1-hour federated token (6); that token passes the per-secret
+IAM check (7) and the bytes land in the pod's tmpfs as a file (8). Keyless end
+to end, every read audit-logged.
 
 ### ⚠️ The one architectural difference vs the GKE POC
 
