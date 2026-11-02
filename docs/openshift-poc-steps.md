@@ -8,8 +8,26 @@ open-source GCP provider authenticates with one shared, keyless WIF identity.
 to production unchanged** (production guardrails:
 [`openshift-landing-zone-runbook.md`](openshift-landing-zone-runbook.md)).
 
-This runbook is self-contained: every manifest is inline. It has not been
-executed against your cluster — expect to adapt SCC/SELinux details (§4).
+This runbook is self-contained: every manifest is inline.
+
+> **✅ VALIDATED 2026-11-02** against an on-prem OpenShift cluster in the
+> landing zone. Five real-world blockers were hit and solved; the fixes are
+> folded into the steps below and summarized here:
+>
+> 1. **Org policy `iam.workloadIdentityPoolProviders` (deny-all)** — needed a
+>    project-scoped override allowing the cluster's issuer (via the LZ
+>    project factory: `org_policies:` block in the project YAML).
+> 2. **Org policy `gcp.resourceLocations`** — the secret must be region-pinned
+>    (`--replication-policy=user-managed --locations=<region>`), not automatic.
+> 3. **SCC/SELinux** — the provider needs the `privileged` SCC **and**
+>    `privileged: true` on both its containers; granular SCCs
+>    (hostmount-anyuid) fail on seccomp, and without container-level
+>    privileged, SELinux blocks writes to the hostPath socket dir.
+> 4. **Registry egress** — nodes could not pull `us-docker.pkg.dev`; mirror
+>    the provider image to an approved registry (quay) first.
+> 5. **`auth: provider-adc` is mandatory** in the SecretProviderClass — the
+>    default (pod-adc) calls a GKE-only identitybindingtoken API and fails
+>    with `status: 400` on-prem.
 
 ## Prerequisites
 
@@ -31,7 +49,7 @@ export PROJECT_ID='udc-cloud-architect-poc'            # or your test project
 export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 export POOL='ocp-csi-poc'
 export PROVIDER='ocp-lab1'
-export PROVIDER_NS='csi-poc-system'
+export PROVIDER_NS='openshift-cluster-csi-drivers'   # official RH pattern: provider lives next to the driver
 export APP_NS='csi-poc'
 export POC_AUDIENCE='https://ocp-csi-poc.example.invalid'
 
@@ -54,9 +72,12 @@ signing keys rotate (`gcloud iam workload-identity-pools providers update-oidc
 gcloud services enable iam.googleapis.com sts.googleapis.com secretmanager.googleapis.com \
   --project="$PROJECT_ID"
 
+# Region-pinned: org policy gcp.resourceLocations forbids 'global'/automatic.
+# Use a region your LZ allows (check: gcloud resource-manager org-policies \
+#   describe gcp.resourceLocations --project=$PROJECT_ID --effective)
 printf '%s' 'POC-DEMO-VALUE-NOT-PRODUCTION' | \
   gcloud secrets create csi-poc-password --project="$PROJECT_ID" \
-    --replication-policy=automatic --data-file=-
+    --replication-policy=user-managed --locations=me-central2 --data-file=-
 
 gcloud iam workload-identity-pools create "$POOL" \
   --project="$PROJECT_ID" --location=global --display-name='OpenShift CSI PoC'
@@ -107,26 +128,37 @@ open-source software**.
 ## 4. OpenShift: install the Google provider DaemonSet
 
 ```bash
-oc get namespace "$PROVIDER_NS" >/dev/null 2>&1 || oc create namespace "$PROVIDER_NS"
-oc get namespace "$APP_NS"      >/dev/null 2>&1 || oc create namespace "$APP_NS"
+oc get namespace "$APP_NS" >/dev/null 2>&1 || oc create namespace "$APP_NS"
+# provider namespace is openshift-cluster-csi-drivers — it already exists
 
-# Upstream manifest, moved out of kube-system
+# If nodes cannot pull us-docker.pkg.dev (ours could not), mirror first from a
+# machine with access (on Apple Silicon, force amd64):
+#   podman pull --arch amd64 us-docker.pkg.dev/secretmanager-csi/secrets-store-csi-driver-provider-gcp/plugin:<tag>
+#   podman tag  ...  <your-registry>/secrets-store-csi-driver-provider-gcp:<tag>
+#   podman push <your-registry>/secrets-store-csi-driver-provider-gcp:<tag>
+
+# Upstream manifest, moved into the driver's namespace
 curl -fsSLo provider-upstream.yaml \
   https://raw.githubusercontent.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp/main/deploy/provider-gcp-plugin.yaml
 sed "s/namespace: kube-system/namespace: ${PROVIDER_NS}/g" \
   provider-upstream.yaml > provider-poc.yaml
+# swap the image for your mirror, and align the socket dir with the RH driver
+# (/var/run/secrets-store-csi-providers) before applying
 oc apply -f provider-poc.yaml
 
-# Narrower than privileged, but still sensitive (hostPath + any UID).
-oc adm policy add-scc-to-user hostmount-anyuid \
+# privileged SCC — same as Red Hat's documented AWS/Azure provider installs
+oc adm policy add-scc-to-user privileged \
   -z secrets-store-csi-driver-provider-gcp -n "$PROVIDER_NS"
 ```
 
-The upstream plugin uses a hostPath socket and an init container that changes
-its ownership. `hostmount-anyuid` may suffice, but SELinux/admission behavior
-differs between clusters — if pods are rejected or socket writes are denied,
-inspect the actual denial before escalating the SCC, and never add
-`privileged` outside this disposable PoC namespace.
+**Validated gotcha:** the SCC grant alone is not enough. Both the chown init
+container and the provider container write to a hostPath directory, which
+SELinux denies for non-privileged containers even under the privileged SCC.
+Patch **both** containers with `securityContext: {privileged: true}` (drop the
+upstream `allowPrivilegeEscalation: false` / seccomp lines — they are
+incompatible with privileged). Granular SCCs were tested and failed:
+`hostmount-anyuid` rejects the seccomp profile, `hostmount-anyuid-v2` still
+hits the SELinux denial.
 
 ### 4b. Configure the provider's keyless credentials
 
@@ -183,6 +215,16 @@ audience must equal `--allowed-audiences` from §2.
 
 ## 5. SecretProviderClass and test pod
 
+Inline CSI volumes from this driver require the app namespace to enforce the
+`privileged` pod-security profile (validated: admission rejects the Deployment
+otherwise):
+
+```bash
+oc label ns "$APP_NS" \
+  security.openshift.io/scc.podSecurityLabelSync=false \
+  pod-security.kubernetes.io/enforce=privileged --overwrite
+```
+
 ```bash
 oc apply -f - <<EOF
 apiVersion: secrets-store.csi.x-k8s.io/v1
@@ -193,6 +235,10 @@ metadata:
 spec:
   provider: gcp
   parameters:
+    # REQUIRED off-GKE: use the provider DaemonSet's own WIF credentials.
+    # The default (pod-adc) calls a GKE-only identitybindingtoken API and
+    # fails with 'could not get idbindtoken token, status: 400' on-prem.
+    auth: provider-adc
     secrets: |
       - resourceName: "projects/${PROJECT_ID}/secrets/csi-poc-password/versions/latest"
         path: "password"
@@ -251,8 +297,14 @@ oc -n "$PROVIDER_NS" logs daemonset/csi-secrets-store-provider-gcp --tail=100
 oc get events -n "$APP_NS" --sort-by=.lastTimestamp | tail -20
 ```
 
+- `could not get idbindtoken token, status: 400` → the SecretProviderClass is
+  missing `auth: provider-adc` (provider fell back to the GKE-only pod-adc mode).
 - `PermissionDenied` → the IAM principal (§2) vs the token `sub`; the
   attribute condition; stale uploaded JWKS.
+- Deployment Forbidden "pod security enforce level lower than privileged" →
+  app namespace is missing the PSA labels (see §5).
+- Provider init container CrashLoop (`chown ... Operation not permitted`) →
+  containers not `privileged: true` (SELinux; see §4).
 - STS `invalid_grant` / issuer errors → issuer mismatch, stale JWKS, or the
   projected token audience ≠ `--allowed-audiences`.
 - Connection timeout / TLS → DNS, proxy, CA trust, firewall for STS and
@@ -275,7 +327,7 @@ oc get events -n "$APP_NS" --sort-by=.lastTimestamp | tail -20
 ```bash
 oc -n "$APP_NS" delete pod csi-demo --ignore-not-found
 oc -n "$APP_NS" delete secretproviderclass csi-poc --ignore-not-found
-oc adm policy remove-scc-from-user hostmount-anyuid \
+oc adm policy remove-scc-from-user privileged \
   -z secrets-store-csi-driver-provider-gcp -n "$PROVIDER_NS"
 oc delete -f provider-poc.yaml --ignore-not-found
 oc delete namespace "$APP_NS" "$PROVIDER_NS" --ignore-not-found

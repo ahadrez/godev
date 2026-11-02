@@ -7,8 +7,19 @@ files from tmpfs; nothing is persisted in OpenShift etcd; no service account
 keys exist anywhere.
 
 **Prior art:** the pattern was proven end-to-end on GKE — see
-[`secret-manager-poc.md`](secret-manager-poc.md). This runbook covers what is
-*different* on-prem, plus the landing-zone integration work.
+[`secret-manager-poc.md`](secret-manager-poc.md) — and **validated on-prem
+2026-11-02** on an LZ OpenShift cluster (see
+[`openshift-poc-steps.md`](openshift-poc-steps.md) for the executed POC and
+its lessons). This runbook covers the production design and the landing-zone
+integration work.
+
+> **Validated lessons now baked into this runbook:** org-policy overrides are
+> needed for `iam.workloadIdentityPoolProviders` (deny-all in the LZ) and
+> `gcp.resourceLocations` (secrets must be region-pinned); the provider runs
+> in `openshift-cluster-csi-drivers` with the privileged SCC and
+> `privileged: true` on both containers (SELinux); the provider image must be
+> mirrored to an approved registry; and every SecretProviderClass needs
+> `auth: provider-adc` — the default auth mode is GKE-only.
 
 ---
 
@@ -127,7 +138,7 @@ gcloud iam workload-identity-pools providers create-oidc $PROVIDER \
   --jwk-json-path jwks.json \
   --allowed-audiences "https://secretmanager.ocp" \
   --attribute-mapping "google.subject=assertion.sub" \
-  --attribute-condition "assertion.sub.startsWith('system:serviceaccount:secrets-store:')"
+  --attribute-condition "assertion.sub.startsWith('system:serviceaccount:openshift-cluster-csi-drivers:')"
 ```
 
 (Drop `--jwk-json-path` if you chose Option B — Google discovers the keys
@@ -140,13 +151,13 @@ Decisions baked in above:
 - **`--allowed-audiences`** — an arbitrary constant you also set on the
   projected token in Phase 3; prevents token reuse against other relying parties.
 - **`--attribute-condition`** — only tokens of ServiceAccounts in the
-  `secrets-store` namespace can federate. Even a stolen token from another
-  namespace is useless at STS.
+  provider's namespace (`openshift-cluster-csi-drivers`) can federate. Even a
+  stolen token from another namespace is useless at STS.
 
 The principal you will grant IAM to (note the K8s token `sub` format):
 
 ```
-principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:secrets-store:csi-provider-gcp
+principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:csi-provider-gcp
 ```
 
 ## 5. Phase 3 — Install the driver and the GCP provider
@@ -163,8 +174,8 @@ spec:
   managementState: Managed
 ```
 
-**5b. GCP provider DaemonSet** — deploy into a dedicated `secrets-store`
-namespace (manifests from the
+**5b. GCP provider DaemonSet** — deploy into `openshift-cluster-csi-drivers`
+(next to the driver — the official Red Hat pattern, validated in the POC) (manifests from the
 [provider repo](https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp),
 adapted). The pieces that differ from stock:
 
@@ -174,14 +185,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: csi-provider-gcp
-  namespace: secrets-store
+  namespace: openshift-cluster-csi-drivers
 ---
 # external_account ADC config — contains NO secrets, only pointers
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gcp-wif-credentials
-  namespace: secrets-store
+  namespace: openshift-cluster-csi-drivers
 data:
   config: |
     {
@@ -217,11 +228,18 @@ volumes:
             items: [{ key: config, path: google-application-credentials.json }]
 ```
 
-**OpenShift-specific:** the driver and provider DaemonSets need hostPath access
-to the kubelet dir → privileged SCC:
+**OpenShift-specific (validated):** the provider needs the privileged SCC
+**and** `securityContext: {privileged: true}` on both its containers — SELinux
+blocks hostPath writes for non-privileged containers even under the SCC, and
+granular SCCs (hostmount-anyuid/-v2) fail on seccomp or the same SELinux
+denial. Mirror the provider image to an approved internal registry (nodes
+typically cannot reach `us-docker.pkg.dev`). App namespaces mounting inline
+CSI volumes additionally need the PSA labels
+(`pod-security.kubernetes.io/enforce=privileged` +
+`security.openshift.io/scc.podSecurityLabelSync=false`).
 
 ```bash
-oc adm policy add-scc-to-user privileged -z csi-provider-gcp -n secrets-store
+oc adm policy add-scc-to-user privileged -z csi-provider-gcp -n openshift-cluster-csi-drivers
 ```
 
 **Rotation:** the OSS driver supports live re-fetch — enable
@@ -242,7 +260,7 @@ otherwise mount any secret that cluster can read. Close the gap in layers:
    gcloud secrets add-iam-policy-binding godev-db-password \
      --project secrets-prod \
      --role roles/secretmanager.secretAccessor \
-     --member "principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:secrets-store:csi-provider-gcp"
+     --member "principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:csi-provider-gcp"
    ```
 2. **Admission policy (namespace isolation):** enforce with Gatekeeper/Kyverno
    that a `SecretProviderClass` in namespace `X` may only reference
@@ -275,6 +293,7 @@ metadata:
 spec:
   provider: gcp                      # was: gke
   parameters:
+    auth: provider-adc               # REQUIRED off-GKE (default pod-adc is GKE-only)
     secrets: |
       - resourceName: "projects/secrets-prod/secrets/godev-db-password/versions/latest"
         path: "db-password"
