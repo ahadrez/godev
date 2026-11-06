@@ -195,7 +195,7 @@ Decisions baked in above:
 The principal you will grant IAM to (note the K8s token `sub` format):
 
 ```
-principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:csi-provider-gcp
+principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:secrets-store-csi-driver-provider-gcp
 ```
 
 ## 5. Phase 3 — Install the driver and the GCP provider
@@ -222,7 +222,7 @@ adapted). The pieces that differ from stock:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: csi-provider-gcp
+  name: secrets-store-csi-driver-provider-gcp
   namespace: openshift-cluster-csi-drivers
 ---
 # external_account ADC config — contains NO secrets, only pointers
@@ -245,7 +245,7 @@ data:
 In the provider DaemonSet pod spec:
 
 ```yaml
-serviceAccountName: csi-provider-gcp
+serviceAccountName: secrets-store-csi-driver-provider-gcp
 containers:
   - name: provider
     env:
@@ -277,7 +277,7 @@ CSI volumes additionally need the PSA labels
 `security.openshift.io/scc.podSecurityLabelSync=false`).
 
 ```bash
-oc adm policy add-scc-to-user privileged -z csi-provider-gcp -n openshift-cluster-csi-drivers
+oc adm policy add-scc-to-user privileged -z secrets-store-csi-driver-provider-gcp -n openshift-cluster-csi-drivers
 ```
 
 **Rotation:** the OSS driver supports live re-fetch — enable
@@ -298,7 +298,7 @@ otherwise mount any secret that cluster can read. Close the gap in layers:
    gcloud secrets add-iam-policy-binding godev-db-password \
      --project secrets-prod \
      --role roles/secretmanager.secretAccessor \
-     --member "principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:csi-provider-gcp"
+     --member "principal://iam.googleapis.com/projects/${ID_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/subject/system:serviceaccount:openshift-cluster-csi-drivers:secrets-store-csi-driver-provider-gcp"
    ```
 2. **Admission policy (namespace isolation):** enforce with Gatekeeper/Kyverno
    that a `SecretProviderClass` in namespace `X` may only reference
