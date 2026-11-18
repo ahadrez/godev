@@ -74,7 +74,7 @@ Unchanged (Figure 2): pod requests CSI volume → driver reads SPC → provider 
 | WIF pool / provider | `ocp-csi-poc` / `ocp-lab1` (PoC names; production naming TBD) |
 | Issuer | `https://kubernetes.default.svc` (cluster default; allowed by project-scoped org-policy override) |
 | JWKS | uploaded via `--jwk-json-path` (no public issuer endpoint) |
-| Audience | `https://ocp-csi-poc.example.invalid` — **placeholder; production audience decision open (§5.4)** |
+| Audience | PoC: `https://ocp-csi-poc.example.invalid` (placeholder). **Production (decided): the provider's own resource URL** — see §5.4 |
 | Subject condition | `assertion.sub == 'system:serviceaccount:openshift-cluster-csi-drivers:secrets-store-csi-driver-provider-gcp'` |
 | Auth mode | `auth: provider-adc` in every SPC — **mandatory off-GKE** (default pod-adc calls a GKE-only API; fails `400` on-prem) **[VERIFIED]** |
 
@@ -100,9 +100,24 @@ Resolved in v1.1: this deployed name is now used consistently across scripts, WI
 
 Grant `roles/secretmanager.secretAccessor` to the federated provider principal **per secret** only (illustrative command unchanged from v1.0, with the §4.2 subject). Outstanding hygiene **[PENDING]**: (a) remove the stale binding for the obsolete subject `...:ucod-hadrezak-sandbox:secrets-store-csi-driver-provider-gcp` on the PoC secret; (b) one-time audit confirming no project-level accessor grants exist.
 
-### 5.4 WIF isolation — [VERIFIED as built, two open items]
+### 5.4 WIF isolation — [VERIFIED as built, one open item]
 
-One pool + provider per cluster; immutable mappings; exact-subject attribute condition — all in place. Open: production **audience** value (replace the placeholder; prefer a reviewed canonical audience), and **JWKS refresh** procedure on cluster key rotation (ADR-08 — currently manual).
+One pool + provider per cluster; immutable mappings; exact-subject attribute condition — all in place.
+
+**Audience (decided):** production uses **Google's default audience — the WIF
+provider's own resource URL**
+(`https://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`):
+omit `allowed_audiences` on the provider and set the DaemonSet's
+projected-token `audience` to that URL. Rationale: Google's documented best
+practice; unique and self-describing by construction; in Terraform the
+OpenShift-side value derives from the provider resource (single source of
+truth, no naming convention to govern). **Cutover note:** audience must change
+on both sides (provider + DaemonSet token spec) in one move — mid-change, new
+mounts fail while running pods are unaffected. Adopt it with the
+Terraform-built production pool; do not modify the running PoC.
+
+Remaining open item: **JWKS refresh** procedure on cluster key rotation
+(ADR-08 — currently manual).
 
 ## 6. OpenShift component design
 
@@ -171,7 +186,7 @@ Go/No-Go criteria unchanged from v1.0 §12.2.
 **P1 — production foundation**
 5. Shared projects `ocp-secrets-dev|test|prod` via LZ project factory; migrate/retire PoC secret; decide ADR-04 before any PROD grant; decide ADR-09 (pool location).
 6. Digest-pin provider + init images; registry approval.
-7. Env overlay removing `ALLOW_REVEAL`; production audience (5.4); naming + ownership registry (5.2).
+7. Env overlay removing `ALLOW_REVEAL`; apply the decided audience (§5.4) in the TF-built pool; naming + ownership registry (5.2).
 
 **P2 — operational readiness**
 8. T-11/T-12 on OpenShift; publish §9.3 as the onboarding contract; set rotation SLO from observed behavior.
@@ -194,6 +209,7 @@ Ownership stages 1–8 and rollout/rollback approach unchanged from v1.0 §13/§
 | ADR-07 | provider-adc production exception | Security / ARB | Open; required for Go |
 | ADR-08 | Rotation interval, reload contract, JWKS refresh automation | Platform + App Teams | Open |
 | ADR-09 *(new)* | WIF pool location: currently in app project `udc-d-30049622-stella-1`; TDD target is a Security-owned identity project. Move pool (re-issue provider config + IAM) or formally accept current location. | Security | Open |
+| ADR-10 *(new)* | Production WIF audience: use Google's default (the provider resource URL); omit `allowed_audiences`, derive the DaemonSet token audience from the provider resource in Terraform. Applied at TF cutover, not on the PoC. | Platform + Security | **Decided 18 Nov 2026** |
 
 ## 15. Configuration appendix
 
