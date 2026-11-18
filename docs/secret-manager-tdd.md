@@ -71,7 +71,7 @@ Unchanged (Figure 2): pod requests CSI volume → driver reads SPC → provider 
 
 | Element | As-built value |
 |---|---|
-| WIF pool / provider | `ocp-csi-poc` / `ocp-lab1` (PoC names; production naming TBD) |
+| WIF pool / provider | `ocp-csi-poc` / `ocp-lab1` (PoC names). **Production convention (decided): pool `ocp-<cluster>-pool`, provider `ocp-<cluster>` (e.g. `ocp-ocpb-pool` / `ocp-ocpb`)** — pool-per-cluster is required anyway because clusters share the default issuer URI, and the ADR-10 audience then self-describes the cluster. Names are immutable: applied at the Terraform build, PoC names left as-is. |
 | Issuer | `https://kubernetes.default.svc` (cluster default; allowed by project-scoped org-policy override) |
 | JWKS | uploaded via `--jwk-json-path` (no public issuer endpoint) |
 | Audience | PoC: `https://ocp-csi-poc.example.invalid` (placeholder). **Production (decided): the provider's own resource URL** — see §5.4 |
